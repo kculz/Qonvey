@@ -1,0 +1,518 @@
+// Qonvey Platform - Complete Database Schema
+// Location: backend/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum UserRole {
+  CARGO_OWNER
+  DRIVER
+  FLEET_OWNER
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum PlanType {
+  FREE
+  STARTER
+  PROFESSIONAL
+  BUSINESS
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum LoadStatus {
+  DRAFT
+  OPEN
+  BIDDING_CLOSED
+  ASSIGNED
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+enum BidStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+}
+
+enum TripStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum VehicleType {
+  PICKUP
+  SMALL_TRUCK
+  MEDIUM_TRUCK
+  LARGE_TRUCK
+  FLATBED
+  REFRIGERATED
+  CONTAINER
+}
+
+enum PaymentMethod {
+  CASH
+  ECOCASH
+  ONEMONEY
+  BANK_TRANSFER
+  CARD
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+model User {
+  id                String      @id @default(uuid())
+  phoneNumber       String      @unique
+  email             String?     @unique
+  passwordHash      String
+  role              UserRole
+  status            UserStatus  @default(PENDING)
+  
+  // Personal Info
+  firstName         String
+  lastName          String
+  profileImage      String?
+  idDocument        String?
+  driversLicense    String?
+  
+  // Business Info (for fleet owners)
+  companyName       String?
+  companyRegistration String?
+  
+  // Ratings
+  rating            Float       @default(0)
+  totalRatings      Int         @default(0)
+  
+  // Verification
+  emailVerified     Boolean     @default(false)
+  phoneVerified     Boolean     @default(false)
+  
+  // Location & Notifications
+  location          Json?       // {address, lat, lng, city}
+  fcmToken          String?
+  
+  // Timestamps
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  lastLoginAt       DateTime?
+
+  // Relations
+  subscription      Subscription?
+  loadsPosted       Load[]      @relation("LoadOwner")
+  bids              Bid[]
+  trips             Trip[]
+  vehicles          Vehicle[]
+  sentMessages      Message[]   @relation("MessageSender")
+  receivedMessages  Message[]   @relation("MessageReceiver")
+  notifications     Notification[]
+  reviews           Review[]    @relation("ReviewAuthor")
+  receivedReviews   Review[]    @relation("ReviewReceiver")
+  teamOwner         TeamMember[] @relation("BusinessTeam")
+  loadTemplates     LoadTemplate[]
+  savedSearches     SavedSearch[]
+
+  @@index([phoneNumber, email])
+  @@index([role, status])
+  @@map("users")
+}
+
+// ============================================
+// SUBSCRIPTION & BILLING
+// ============================================
+
+model Subscription {
+  id                String              @id @default(uuid())
+  userId            String              @unique
+  plan              PlanType            @default(FREE)
+  status            SubscriptionStatus  @default(TRIAL)
+  billingCycle      String              @default("MONTHLY")
+  amount            Float               @default(0)
+  currency          String              @default("USD")
+  
+  // Trial tracking
+  trialStartDate    DateTime?
+  trialEndDate      DateTime?
+  hasUsedTrial      Boolean             @default(false)
+  
+  // Subscription dates
+  startDate         DateTime?
+  endDate           DateTime?
+  nextBillingDate   DateTime?
+  
+  // Payment
+  autoRenew         Boolean             @default(true)
+  paymentMethod     PaymentMethod?
+  lastPayment       DateTime?
+  
+  // Usage tracking (reset monthly)
+  loadsPostedThisMonth    Int           @default(0)
+  bidsPlacedThisMonth     Int           @default(0)
+  lastResetDate           DateTime?
+  
+  // Relations
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoices          SubscriptionInvoice[]
+  
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  
+  @@index([userId, status, plan])
+  @@map("subscriptions")
+}
+
+model SubscriptionInvoice {
+  id                String      @id @default(uuid())
+  subscriptionId    String
+  userId            String
+  plan              PlanType
+  amount            Float
+  currency          String      @default("USD")
+  billingPeriod     String      // "January 2025"
+  status            String      @default("PENDING") // PENDING, PAID, OVERDUE, CANCELLED
+  dueDate           DateTime
+  paidAt            DateTime?
+  paymentMethod     PaymentMethod?
+  reference         String?     // Payment reference from EcoCash/OneMoney
+  
+  // Relations
+  subscription      Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  
+  @@index([userId, status])
+  @@index([status, dueDate])
+  @@map("subscription_invoices")
+}
+
+// ============================================
+// LOADS & DELIVERIES
+// ============================================
+
+model Load {
+  id                String      @id @default(uuid())
+  ownerId           String
+  title             String
+  description       String      @db.Text
+  cargoType         String
+  weight            Float       // kg
+  volume            Float?      // cubic meters
+  
+  // Locations
+  pickupLocation    Json        // {address, lat, lng, city, province}
+  deliveryLocation  Json
+  
+  // Dates
+  pickupDate        DateTime
+  deliveryDate      DateTime?
+  
+  // Pricing (optional - users negotiate)
+  suggestedPrice    Float?
+  currency          String      @default("USD")
+  
+  // Status & Settings
+  status            LoadStatus  @default(DRAFT)
+  vehicleTypes      VehicleType[]
+  images            String[]
+  documents         String[]
+  
+  // Requirements
+  requiresInsurance Boolean     @default(false)
+  fragile           Boolean     @default(false)
+  
+  // Metadata
+  expiresAt         DateTime?
+  viewCount         Int         @default(0)
+  
+  // Timestamps
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  publishedAt       DateTime?
+
+  // Relations
+  owner             User        @relation("LoadOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  bids              Bid[]
+  trip              Trip?
+  
+  @@index([status, pickupDate, createdAt])
+  @@index([ownerId])
+  @@map("loads")
+}
+
+model Bid {
+  id                String      @id @default(uuid())
+  loadId            String
+  driverId          String
+  vehicleId         String?
+  
+  // Offer details
+  proposedPrice     Float
+  currency          String      @default("USD")
+  message           String?     @db.Text
+  estimatedDuration Int?        // hours
+  
+  // Status
+  status            BidStatus   @default(PENDING)
+  expiresAt         DateTime?
+  
+  // Timestamps
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  load              Load        @relation(fields: [loadId], references: [id], onDelete: Cascade)
+  driver            User        @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  vehicle           Vehicle?    @relation(fields: [vehicleId], references: [id])
+  trip              Trip?
+
+  @@index([loadId, status])
+  @@index([driverId])
+  @@map("bids")
+}
+
+model Trip {
+  id                String      @id @default(uuid())
+  loadId            String      @unique
+  bidId             String      @unique
+  driverId          String
+  
+  // Trip details
+  status            TripStatus  @default(SCHEDULED)
+  startTime         DateTime?
+  endTime           DateTime?
+  currentLocation   Json?       // {lat, lng, timestamp}
+  route             Json[]      // Array of {lat, lng, timestamp}
+  
+  // Payment (users handle directly, this is just for tracking)
+  agreedPrice       Float
+  currency          String      @default("USD")
+  paymentMethod     PaymentMethod?
+  
+  // Proof documents
+  proofOfPickup     String?
+  proofOfDelivery   String?
+  signature         String?
+  notes             String?     @db.Text
+  
+  // Timestamps
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  load              Load        @relation(fields: [loadId], references: [id], onDelete: Cascade)
+  bid               Bid         @relation(fields: [bidId], references: [id], onDelete: Cascade)
+  driver            User        @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  review            Review?
+
+  @@index([driverId, status])
+  @@index([loadId])
+  @@map("trips")
+}
+
+// ============================================
+// VEHICLES
+// ============================================
+
+model Vehicle {
+  id                String      @id @default(uuid())
+  ownerId           String
+  type              VehicleType
+  
+  // Vehicle details
+  make              String
+  model             String
+  year              Int
+  licensePlate      String      @unique
+  color             String?
+  
+  // Capacity
+  capacity          Float       // kg
+  volumeCapacity    Float?      // cubic meters
+  
+  // Documents
+  images            String[]
+  insurance         String?
+  registration      String?
+  
+  // Status
+  isActive          Boolean     @default(true)
+  
+  // Timestamps
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  owner             User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  bids              Bid[]
+
+  @@index([ownerId, isActive])
+  @@map("vehicles")
+}
+
+// ============================================
+// COMMUNICATION
+// ============================================
+
+model Message {
+  id                String      @id @default(uuid())
+  senderId          String
+  receiverId        String
+  content           String      @db.Text
+  
+  // Context
+  loadId            String?
+  bidId             String?
+  
+  // Metadata
+  read              Boolean     @default(false)
+  readAt            DateTime?
+  
+  // Timestamps
+  createdAt         DateTime    @default(now())
+
+  // Relations
+  sender            User        @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver          User        @relation("MessageReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([senderId, receiverId])
+  @@index([loadId])
+  @@map("messages")
+}
+
+model Notification {
+  id                String      @id @default(uuid())
+  userId            String
+  title             String
+  body              String      @db.Text
+  data              Json?
+  type              String      // BID_RECEIVED, LOAD_POSTED, TRIP_STARTED, etc.
+  read              Boolean     @default(false)
+  readAt            DateTime?
+  
+  createdAt         DateTime    @default(now())
+
+  // Relations
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@map("notifications")
+}
+
+// ============================================
+// REVIEWS & RATINGS
+// ============================================
+
+model Review {
+  id                String      @id @default(uuid())
+  tripId            String      @unique
+  authorId          String
+  receiverId        String
+  rating            Int         // 1-5
+  comment           String?     @db.Text
+  
+  createdAt         DateTime    @default(now())
+
+  // Relations
+  trip              Trip        @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  author            User        @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  receiver          User        @relation("ReviewReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([receiverId])
+  @@map("reviews")
+}
+
+// ============================================
+// TEAM MANAGEMENT (Business Tier)
+// ============================================
+
+model TeamMember {
+  id                String      @id @default(uuid())
+  businessOwnerId   String
+  email             String
+  phoneNumber       String?
+  firstName         String
+  lastName          String
+  role              String      // DRIVER, DISPATCHER, ADMIN
+  permissions       Json        // Array of permissions
+  isActive          Boolean     @default(true)
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  businessOwner     User        @relation("BusinessTeam", fields: [businessOwnerId], references: [id], onDelete: Cascade)
+
+  @@unique([businessOwnerId, email])
+  @@index([businessOwnerId, isActive])
+  @@map("team_members")
+}
+
+// ============================================
+// TEMPLATES & SAVED SEARCHES
+// ============================================
+
+model LoadTemplate {
+  id                String      @id @default(uuid())
+  userId            String
+  name              String
+  description       String?     @db.Text
+  cargoType         String
+  weight            Float?
+  volume            Float?
+  pickupLocation    Json
+  deliveryLocation  Json
+  vehicleTypes      VehicleType[]
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("load_templates")
+}
+
+model SavedSearch {
+  id                String      @id @default(uuid())
+  userId            String
+  name              String
+  filters           Json        // Search criteria
+  notifyOnNew       Boolean     @default(true)
+  
+  createdAt         DateTime    @default(now())
+
+  // Relations
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("saved_searches")
+}
