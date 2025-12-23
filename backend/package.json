@@ -68,7 +68,7 @@
     "multer": "^2.0.2",
     "node-cron": "^3.0.3",
     "nodemailer": "^7.0.12",
-    "paynow": "^1.0.7",
+    "paynow": "^1.2.0",
     "rate-limit-redis": "^4.3.1",
     "socket.io": "^4.8.1",
     "swagger-jsdoc": "^6.2.8",
