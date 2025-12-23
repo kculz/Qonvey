@@ -2,10 +2,10 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import { env } from './config/env';
-import versioningMiddleware from './middleware/versioning.middleware';
-import errorMiddleware from './middleware/error.middleware';
-import v1Routes from './api/v1';
+import env  from '@/config/env';
+import versioningMiddleware from '@/middleware/versioning.middleware';
+import errorMiddleware from '@/middleware/error.middleware';
+import v1Routes from '@/api/v1';
 
 const app = express();
 
