@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { env } from '../config/env';
+import  env  from '@/config/env';
 
 export const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -10,7 +10,7 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction) 
   }
 
   try {
-    const decoded = jwt.verify(token, env.jwtSecret) as any;
+    const decoded = jwt.verify(token, env.jwt) as any;
     req.user = decoded.user;
     next();
   } catch (error) {
