@@ -6,53 +6,7 @@ import { loggers } from '@/utils/logger';
 import { subscriptionService } from '@/services/subscription.service';
 import { notificationService } from '@/services/notification.service';
 import { LoadStatus, VehicleType, Prisma } from '@prisma/client';
-
-export interface CreateLoadData {
-  title: string;
-  description: string;
-  cargoType: string;
-  weight: number;
-  volume?: number;
-  pickupLocation: {
-    address: string;
-    lat: number;
-    lng: number;
-    city: string;
-    province?: string;
-  };
-  deliveryLocation: {
-    address: string;
-    lat: number;
-    lng: number;
-    city: string;
-    province?: string;
-  };
-  pickupDate: Date;
-  deliveryDate?: Date;
-  suggestedPrice?: number;
-  currency?: string;
-  vehicleTypes: VehicleType[];
-  images?: string[];
-  documents?: string[];
-  requiresInsurance?: boolean;
-  fragile?: boolean;
-  expiresAt?: Date;
-}
-
-export interface LoadFilters {
-  status?: LoadStatus;
-  cargoType?: string;
-  vehicleTypes?: VehicleType[];
-  pickupCity?: string;
-  deliveryCity?: string;
-  minWeight?: number;
-  maxWeight?: number;
-  minPrice?: number;
-  maxPrice?: number;
-  pickupDateFrom?: Date;
-  pickupDateTo?: Date;
-  searchQuery?: string;
-}
+import type { CreateLoadData, LoadFilters } from '@/types/load.types';
 
 class LoadService {
   // ============================================

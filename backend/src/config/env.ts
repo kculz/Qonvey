@@ -99,8 +99,8 @@ const envSchema = z.object({
   // Client URLs
   CLIENT_URL: z.string().url().default('http://localhost:3000'),
   MOBILE_DEEP_LINK: z.string().default('qonvey://'),
-  APP_STORE_URL: z.string().url().optional(),
-  PLAY_STORE_URL: z.string().url().optional(),
+  // APP_STORE_URL: z.string().url().optional(),
+  // PLAY_STORE_URL: z.string().url().optional(),
 
   // Admin
   ADMIN_EMAIL: z.string().email().optional(),
@@ -273,8 +273,8 @@ export const config = {
   client: {
     url: env.CLIENT_URL,
     mobileDeepLink: env.MOBILE_DEEP_LINK,
-    appStoreUrl: env.APP_STORE_URL || '',
-    playStoreUrl: env.PLAY_STORE_URL || '',
+    // appStoreUrl: env.APP_STORE_URL || '',
+    // playStoreUrl: env.PLAY_STORE_URL || '',
   },
 
   // Admin & Support

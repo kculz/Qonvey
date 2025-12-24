@@ -6,16 +6,7 @@ import { loggers } from '@/utils/logger';
 import { subscriptionService } from '@/services/subscription.service';
 import { notificationService } from '@/services/notification.service';
 import { BidStatus, Prisma } from '@prisma/client';
-
-export interface CreateBidData {
-  loadId: string;
-  proposedPrice: number;
-  currency?: string;
-  message?: string;
-  estimatedDuration?: number;
-  vehicleId?: string;
-  expiresAt?: Date;
-}
+import type { CreateBidData } from '@/types/bid.types';
 
 class BidService {
   // ============================================

@@ -2,12 +2,12 @@
 // Location: backend/prisma/schema.prisma
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../client"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 // ============================================
@@ -132,6 +132,8 @@ model User {
   vehicles          Vehicle[]
   sentMessages      Message[]   @relation("MessageSender")
   receivedMessages  Message[]   @relation("MessageReceiver")
+  callsInitiated    Call[]      @relation("CallCaller")
+  callsReceived     Call[]      @relation("CallReceiver")
   notifications     Notification[]
   reviews           Review[]    @relation("ReviewAuthor")
   receivedReviews   Review[]    @relation("ReviewReceiver")
@@ -405,6 +407,53 @@ model Message {
   @@index([senderId, receiverId])
   @@index([loadId])
   @@map("messages")
+}
+
+enum CallStatus {
+  INITIATED
+  RINGING
+  ANSWERED
+  REJECTED
+  MISSED
+  ENDED
+  CANCELLED
+}
+
+enum CallType {
+  AUDIO
+  VIDEO
+}
+
+model Call {
+  id                String      @id @default(uuid())
+  callerId          String
+  receiverId        String
+  
+  // Call details
+  type              CallType    @default(AUDIO)
+  status            CallStatus  @default(INITIATED)
+  
+  // Context
+  loadId            String?
+  bidId             String?
+  
+  // Call duration
+  startedAt         DateTime?
+  endedAt           DateTime?
+  duration           Int?        // seconds
+  
+  // Timestamps
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  caller            User        @relation("CallCaller", fields: [callerId], references: [id], onDelete: Cascade)
+  receiver          User        @relation("CallReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([callerId, receiverId])
+  @@index([status])
+  @@index([loadId])
+  @@map("calls")
 }
 
 model Notification {

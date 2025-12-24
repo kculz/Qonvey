@@ -5,34 +5,7 @@ import prisma from '@/config/database';
 import { loggers } from '@/utils/logger';
 import { subscriptionService } from './subscription.service';
 import { VehicleType } from '@prisma/client';
-
-export interface CreateVehicleData {
-  type: VehicleType;
-  make: string;
-  model: string;
-  year: number;
-  licensePlate: string;
-  color?: string;
-  capacity: number;
-  volumeCapacity?: number;
-  images?: string[];
-  insurance?: string;
-  registration?: string;
-}
-
-export interface UpdateVehicleData {
-  type?: VehicleType;
-  make?: string;
-  model?: string;
-  year?: number;
-  color?: string;
-  capacity?: number;
-  volumeCapacity?: number;
-  images?: string[];
-  insurance?: string;
-  registration?: string;
-  isActive?: boolean;
-}
+import type { CreateVehicleData, UpdateVehicleData } from '@/types/vehicle.types';
 
 class VehicleService {
   // ============================================

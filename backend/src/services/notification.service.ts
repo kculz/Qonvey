@@ -7,19 +7,7 @@ import nodemailer from 'nodemailer';
 import prisma from '@/config/database';
 import { config } from '@/config/env';
 import { loggers } from '@/utils/logger';
-
-export interface NotificationData {
-  title: string;
-  body: string;
-  data?: Record<string, any>;
-  type?: string;
-}
-
-export interface SendResult {
-  success: boolean;
-  messageId?: string;
-  error?: string;
-}
+import type { NotificationData, SendResult } from '@/types/notification.types';
 
 class NotificationService {
   private twilioClient: any = null;
@@ -86,52 +74,140 @@ class NotificationService {
   // SMS NOTIFICATIONS
   // ============================================
 
-  async sendSMS(phoneNumber: string, message: string): Promise<SendResult> {
+  async sendSMS(phoneNumber: string, message: string, email?: string, emailSubject?: string, emailHtml?: string): Promise<SendResult> {
     try {
-      if (!this.twilioClient) {
-        return {
+      const results: SendResult[] = [];
+
+      // Send SMS
+      if (this.twilioClient) {
+        try {
+          // Format phone number for Zimbabwe
+          const formattedPhone = this.formatPhoneNumber(phoneNumber);
+
+          const result = await this.twilioClient.messages.create({
+            body: message,
+            from: config.sms.twilio.phoneNumber,
+            to: formattedPhone,
+          });
+
+          loggers.notification.sent('', 'sms', 'sms');
+          results.push({
+            success: true,
+            messageId: result.sid,
+          });
+        } catch (error: any) {
+          loggers.error('SMS send failed', error);
+          results.push({
+            success: false,
+            error: error.message || 'Failed to send SMS',
+          });
+        }
+      } else {
+        results.push({
           success: false,
           error: 'SMS service not configured',
-        };
+        });
       }
 
-      // Format phone number for Zimbabwe
-      const formattedPhone = this.formatPhoneNumber(phoneNumber);
+      // Send email if provided
+      if (email && this.emailTransporter) {
+        try {
+          const emailResult = await this.sendEmail(
+            email,
+            emailSubject || 'Qonvey Notification',
+            emailHtml || `<p>${message}</p>`,
+            message
+          );
+          results.push(emailResult);
+        } catch (error: any) {
+          loggers.error('Email send failed after SMS', error);
+          // Don't fail the whole operation if email fails
+        }
+      }
 
-      const result = await this.twilioClient.messages.create({
-        body: message,
-        from: config.sms.twilio.phoneNumber,
-        to: formattedPhone,
-      });
-
-      loggers.notification.sent('', 'sms', 'sms');
-
+      // Return success if at least one channel succeeded
+      const hasSuccess = results.some(r => r.success);
       return {
-        success: true,
-        messageId: result.sid,
+        success: hasSuccess,
+        messageId: results.find(r => r.messageId)?.messageId,
+        error: results.find(r => r.error)?.error,
       };
     } catch (error: any) {
-      loggers.error('SMS send failed', error);
+      loggers.error('SMS/Email send failed', error);
       return {
         success: false,
-        error: error.message || 'Failed to send SMS',
+        error: error.message || 'Failed to send notification',
       };
     }
   }
 
-  async sendOTP(phoneNumber: string, otp: string): Promise<SendResult> {
+  async sendOTP(phoneNumber: string, otp: string, email?: string, firstName?: string): Promise<SendResult> {
     const message = `Your Qonvey verification code is: ${otp}. Valid for 10 minutes. Do not share this code.`;
-    return await this.sendSMS(phoneNumber, message);
+    
+    const emailSubject = 'Your Qonvey Verification Code';
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #2563eb;">${firstName ? `Hi ${firstName},` : 'Hello,'}</h2>
+        <p>Your Qonvey verification code is:</p>
+        <div style="background-color: #f3f4f6; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center;">
+          <h1 style="color: #2563eb; font-size: 32px; margin: 0; letter-spacing: 5px;">${otp}</h1>
+        </div>
+        <p>This code is valid for <strong>10 minutes</strong>. Do not share this code with anyone.</p>
+        <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
+          If you didn't request this code, please ignore this email or contact support at ${config.support.email}.
+        </p>
+      </div>
+    `;
+
+    return await this.sendSMS(phoneNumber, message, email, emailSubject, emailHtml);
   }
 
-  async sendBidNotificationSMS(phoneNumber: string, loadTitle: string, bidAmount: number) {
+  async sendBidNotificationSMS(phoneNumber: string, loadTitle: string, bidAmount: number, email?: string, firstName?: string) {
     const message = `New bid received for "${loadTitle}": $${bidAmount}. Login to Qonvey to view details.`;
-    return await this.sendSMS(phoneNumber, message);
+    
+    const emailSubject = 'New Bid Received - Qonvey';
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #2563eb;">${firstName ? `Hi ${firstName},` : 'Hello,'}</h2>
+        <p>You have received a new bid for your load:</p>
+        <div style="background-color: #f3f4f6; padding: 20px; border-radius: 5px; margin: 20px 0;">
+          <p><strong>Load:</strong> ${loadTitle}</p>
+          <p><strong>Bid Amount:</strong> $${bidAmount}</p>
+        </div>
+        <p style="margin-top: 30px;">
+          <a href="${config.client.url}/loads" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+            View Bid Details
+          </a>
+        </p>
+      </div>
+    `;
+
+    return await this.sendSMS(phoneNumber, message, email, emailSubject, emailHtml);
   }
 
-  async sendPaymentReminderSMS(phoneNumber: string, amount: number, dueDate: string) {
+  async sendPaymentReminderSMS(phoneNumber: string, amount: number, dueDate: string, email?: string, firstName?: string) {
     const message = `Qonvey subscription payment of $${amount} is due on ${dueDate}. Pay now to continue enjoying premium features.`;
-    return await this.sendSMS(phoneNumber, message);
+    
+    const emailSubject = `Payment Reminder - $${amount} due on ${dueDate}`;
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #dc2626;">Payment Reminder</h2>
+        <p>${firstName ? `Hi ${firstName},` : 'Hello,'}</p>
+        <p>Your Qonvey subscription payment is due soon:</p>
+        <div style="background-color: #fef2f2; padding: 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #dc2626;">
+          <p><strong>Amount:</strong> $${amount}</p>
+          <p><strong>Due Date:</strong> ${dueDate}</p>
+        </div>
+        <p>Pay now to continue enjoying premium features without interruption.</p>
+        <p style="margin-top: 30px;">
+          <a href="${config.client.url}/subscription" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+            Pay Now
+          </a>
+        </p>
+      </div>
+    `;
+
+    return await this.sendSMS(phoneNumber, message, email, emailSubject, emailHtml);
   }
 
   private formatPhoneNumber(phone: string): string {
@@ -399,10 +475,11 @@ class NotificationService {
         ? this.sendPushNotification(userId, notification)
         : Promise.resolve({ success: false }),
       channels.includes('sms') && user.phoneNumber && config.features.smsNotifications
-        ? this.sendSMS(user.phoneNumber, notification.body)
+        ? this.sendSMS(user.phoneNumber, notification.body, user.email || undefined, notification.title, `<p>${notification.body}</p>`)
         : Promise.resolve({ success: false }),
-      channels.includes('email') && user.email && config.features.emailNotifications
-        ? this.sendEmail(user.email, notification.title, notification.body)
+      // Send email if explicitly requested or if SMS was sent (to ensure both are sent)
+      (channels.includes('email') || (channels.includes('sms') && user.email)) && user.email && config.features.emailNotifications
+        ? this.sendEmail(user.email, notification.title, `<p>${notification.body}</p>`)
         : Promise.resolve({ success: false }),
     ]);
 
@@ -432,7 +509,7 @@ class NotificationService {
       data: { loadTitle },
     };
 
-    await this.notifyUser(driverId, notification, ['push', 'sms']);
+    await this.notifyUser(driverId, notification, ['push', 'sms', 'email']);
   }
 
   async notifyTripStarted(loadOwnerId: string, loadTitle: string, driverName: string) {
@@ -454,7 +531,7 @@ class NotificationService {
       data: { loadTitle },
     };
 
-    await this.notifyUser(loadOwnerId, notification, ['push', 'sms']);
+    await this.notifyUser(loadOwnerId, notification, ['push', 'sms', 'email']);
   }
 
   async notifyPaymentReminder(userId: string, amount: number, dueDate: Date) {

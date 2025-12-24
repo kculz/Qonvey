@@ -1,43 +1,84 @@
+# .gitignore - Backend
+# Location: backend/.gitignore
 
-# Node.js dependencies
+# ============================================
+# DEPENDENCIES
+# ============================================
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
 
-# Logs
-logs/
-
-# Environment variables
+# ============================================
+# ENVIRONMENT VARIABLES
+# ============================================
 .env
+.env.local
+.env.development
+.env.production
+.env.test
 
-# Operating system files
-.DS_Store
-Thumbs.db
-
-# Build and dist directories
-build/
+# ============================================
+# BUILD OUTPUT
+# ============================================
 dist/
+build/
+*.tsbuildinfo
 
-# Express-specific ignores
+# ============================================
+# LOGS
+# ============================================
+logs/
 *.log
-*.pid
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# IDE-specific ignores
-# IntelliJ IDEA
-.idea/
-# Visual Studio Code
+# ============================================
+# DATABASE
+# ============================================
+*.db
+*.sqlite
+*.sqlite3
+
+# ============================================
+# TESTING
+# ============================================
+coverage/
+.nyc_output/
+*.lcov
+
+# ============================================
+# IDE & EDITORS
+# ============================================
 .vscode/
-
-# Other ignores
-*.tmp
-*.cache
-*.DS_Store
+.idea/
 *.swp
+*.swo
+*~
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
-# Comments:
-# Ignore node_modules to avoid committing dependencies
-# Ignore logs to avoid committing log files
-# Ignore .env to avoid committing environment variables
-# Ignore operating system files to avoid committing unnecessary files
-# Ignore build and dist directories to avoid committing compiled files
-# Ignore Express-specific files to avoid committing unnecessary files
-# Ignore IDE-specific files to avoid committing IDE settings
-# Ignore other unnecessary files
+# ============================================
+# UPLOADS & TEMP FILES
+# ============================================
+uploads/
+tmp/
+temp/
+*.tmp
+
+# ============================================
+# MISC
+# ============================================
+.cache/
+.parcel-cache/
+.eslintcache
+.prettierignore

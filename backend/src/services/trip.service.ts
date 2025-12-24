@@ -5,21 +5,7 @@ import prisma from '@/config/database';
 import { loggers } from '@/utils/logger';
 import { notificationService } from '@/services/notification.service';
 import { TripStatus, PaymentMethod } from '@prisma/client';
-
-export interface LocationUpdate {
-  lat: number;
-  lng: number;
-  timestamp: Date;
-}
-
-export interface TripUpdateData {
-  currentLocation?: LocationUpdate;
-  paymentMethod?: PaymentMethod;
-  notes?: string;
-  proofOfPickup?: string;
-  proofOfDelivery?: string;
-  signature?: string;
-}
+import type { LocationUpdate, TripUpdateData } from '@/types/trip.types';
 
 class TripService {
   // ============================================

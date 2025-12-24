@@ -86,7 +86,7 @@ export const generalLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue with rate-limit-redis
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:general:',
     }),
   }),
@@ -107,7 +107,7 @@ export const authLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:auth:',
     }),
   }),
@@ -141,7 +141,7 @@ export const loadPostingLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:loads:',
     }),
   }),
@@ -174,7 +174,7 @@ export const bidPlacingLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:bids:',
     }),
   }),
@@ -195,7 +195,7 @@ export const messageLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:messages:',
     }),
   }),
@@ -216,7 +216,7 @@ export const uploadLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:uploads:',
     }),
   }),
@@ -237,7 +237,7 @@ export const paymentLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:payment:',
     }),
   }),
@@ -258,7 +258,7 @@ export const otpLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:otp:',
     }),
   }),
@@ -279,7 +279,7 @@ export const searchLimiter = rateLimit({
   ...(redisClient && {
     store: new RedisStore({
       // @ts-expect-error - Known typing issue
-      client: redisClient,
+      sendCommand: (...args: string[]) => redisClient!.call(...args),
       prefix: 'rl:search:',
     }),
   }),

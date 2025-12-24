@@ -2,53 +2,31 @@
 // Location: backend/src/services/auth.service.ts
 
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import jwt, { Secret, SignOptions } from 'jsonwebtoken';
 import crypto from 'crypto';
 import prisma from '@/config/database';
 import { config } from '@/config/env';
 import { loggers } from '@/utils/logger';
 import { subscriptionService } from '@/services/subscription.service';
 import { notificationService } from '@/services/notification.service';
-import { UserRole } from '@prisma/client';
-
-export interface RegisterData {
-  phoneNumber: string;
-  email?: string;
-  password: string;
-  firstName: string;
-  lastName: string;
-  role: UserRole;
-  companyName?: string;
-  companyRegistration?: string;
-  driversLicense?: string;
-  idDocument?: string;
-}
-
-export interface LoginData {
-  identifier: string; // phone or email
-  password: string;
-}
-
-export interface TokenPayload {
-  userId: string;
-  role: UserRole;
-}
-
-export interface AuthTokens {
-  accessToken: string;
-  refreshToken: string;
-}
+import { otpRedis } from '@/utils/redis';
+import { formatPhoneNumber, maskPhoneNumber } from '@/utils/phone';
+import type {
+  RegisterData,
+  LoginData,
+  TokenPayload,
+  AuthTokens,
+  UpdateProfileData,
+} from '@/types/auth.types';
 
 class AuthService {
-  private otpStore = new Map<string, { otp: string; expiresAt: Date; attempts: number }>();
-
   // ============================================
   // REGISTRATION
   // ============================================
 
   async register(data: RegisterData, ip?: string) {
     // Validate phone number format
-    const phoneNumber = this.formatPhoneNumber(data.phoneNumber);
+    const phoneNumber = formatPhoneNumber(data.phoneNumber);
 
     // Check if user already exists
     const existingUser = await prisma.user.findFirst({
@@ -95,8 +73,8 @@ class AuthService {
     // Generate OTP for phone verification
     const otp = await this.generateOTP(phoneNumber);
 
-    // Send OTP via SMS
-    await notificationService.sendOTP(phoneNumber, otp);
+    // Send OTP via SMS and Email
+    await notificationService.sendOTP(phoneNumber, otp, data.email, data.firstName);
 
     loggers.auth.register(user.id, data.role);
 
@@ -121,7 +99,7 @@ class AuthService {
     const user = await prisma.user.findFirst({
       where: {
         OR: [
-          { phoneNumber: this.formatPhoneNumber(data.identifier) },
+          { phoneNumber: formatPhoneNumber(data.identifier) },
           { email: data.identifier },
         ],
       },
@@ -155,7 +133,7 @@ class AuthService {
     if (!user.phoneVerified) {
       // Generate and send OTP
       const otp = await this.generateOTP(user.phoneNumber);
-      await notificationService.sendOTP(user.phoneNumber, otp);
+      await notificationService.sendOTP(user.phoneNumber, otp, user.email || undefined, user.firstName);
 
       return {
         userId: user.id,
@@ -199,48 +177,38 @@ class AuthService {
     // Generate 6-digit OTP
     const otp = crypto.randomInt(100000, 999999).toString();
 
-    // Store OTP with 10-minute expiration
-    const expiresAt = new Date();
-    expiresAt.setMinutes(expiresAt.getMinutes() + 10);
+    // Format phone number
+    const formattedPhone = formatPhoneNumber(phoneNumber);
 
-    this.otpStore.set(phoneNumber, {
-      otp,
-      expiresAt,
-      attempts: 0,
-    });
+    // Store OTP in Redis with 10-minute expiration (600 seconds)
+    await otpRedis.set(formattedPhone, otp, 600);
 
-    loggers.info('OTP generated', { phoneNumber });
+    loggers.info('OTP generated', { phoneNumber: formattedPhone });
     return otp;
   }
 
   async verifyOTP(phoneNumber: string, otp: string) {
-    const formattedPhone = this.formatPhoneNumber(phoneNumber);
-    const storedOTP = this.otpStore.get(formattedPhone);
+    const formattedPhone = formatPhoneNumber(phoneNumber);
+    const storedOTP = await otpRedis.get(formattedPhone);
 
     if (!storedOTP) {
       throw new Error('OTP not found or expired');
     }
 
-    // Check expiration
-    if (new Date() > storedOTP.expiresAt) {
-      this.otpStore.delete(formattedPhone);
-      throw new Error('OTP expired');
-    }
-
     // Check attempts
     if (storedOTP.attempts >= 5) {
-      this.otpStore.delete(formattedPhone);
+      await otpRedis.delete(formattedPhone);
       throw new Error('Too many failed attempts');
     }
 
     // Verify OTP
     if (storedOTP.otp !== otp) {
-      storedOTP.attempts++;
+      await otpRedis.incrementAttempts(formattedPhone);
       throw new Error('Invalid OTP');
     }
 
     // OTP is valid, remove from store
-    this.otpStore.delete(formattedPhone);
+    await otpRedis.delete(formattedPhone);
 
     // Update user as verified
     const user = await prisma.user.update({
@@ -268,7 +236,7 @@ class AuthService {
   }
 
   async resendOTP(phoneNumber: string) {
-    const formattedPhone = this.formatPhoneNumber(phoneNumber);
+    const formattedPhone = formatPhoneNumber(phoneNumber);
 
     // Check if user exists
     const user = await prisma.user.findUnique({
@@ -286,8 +254,8 @@ class AuthService {
     // Generate new OTP
     const otp = await this.generateOTP(formattedPhone);
 
-    // Send OTP
-    await notificationService.sendOTP(formattedPhone, otp);
+    // Send OTP via SMS and Email
+    await notificationService.sendOTP(formattedPhone, otp, user.email || undefined, user.firstName);
 
     return { message: 'OTP sent successfully' };
   }
@@ -301,7 +269,7 @@ class AuthService {
     const user = await prisma.user.findFirst({
       where: {
         OR: [
-          { phoneNumber: this.formatPhoneNumber(identifier) },
+          { phoneNumber: formatPhoneNumber(identifier) },
           { email: identifier },
         ],
       },
@@ -320,7 +288,7 @@ class AuthService {
 
     return { 
       message: 'OTP sent to your registered phone number',
-      phoneNumber: this.maskPhoneNumber(user.phoneNumber),
+      phoneNumber: maskPhoneNumber(user.phoneNumber),
     };
   }
 
@@ -328,7 +296,7 @@ class AuthService {
     // Verify OTP
     await this.verifyOTP(phoneNumber, otp);
 
-    const formattedPhone = this.formatPhoneNumber(phoneNumber);
+    const formattedPhone = formatPhoneNumber(phoneNumber);
 
     // Hash new password
     const passwordHash = await bcrypt.hash(newPassword, 10);
@@ -377,17 +345,17 @@ class AuthService {
   // TOKEN MANAGEMENT
   // ============================================
 
-  generateTokens(payload: TokenPayload): AuthTokens {
-    const accessToken = jwt.sign(payload, config.jwt.secret, {
-      expiresIn: config.jwt.expire,
-    });
+generateTokens(payload: TokenPayload): AuthTokens {
+  const accessToken = jwt.sign(payload, config.jwt.secret as Secret, {
+    expiresIn: config.jwt.expire as SignOptions['expiresIn'],
+  });
 
-    const refreshToken = jwt.sign(payload, config.jwt.refreshSecret, {
-      expiresIn: config.jwt.refreshExpire,
-    });
+  const refreshToken = jwt.sign(payload, config.jwt.refreshSecret as Secret, {
+    expiresIn: config.jwt.refreshExpire as SignOptions['expiresIn'],
+  });
 
-    return { accessToken, refreshToken };
-  }
+  return { accessToken, refreshToken };
+}
 
   verifyAccessToken(token: string): TokenPayload {
     try {
@@ -433,30 +401,6 @@ class AuthService {
   // HELPERS
   // ============================================
 
-  private formatPhoneNumber(phone: string): string {
-    // Remove spaces and dashes
-    let formatted = phone.replace(/[\s-]/g, '');
-
-    // If starts with 0, replace with +263
-    if (formatted.startsWith('0')) {
-      formatted = '+263' + formatted.substring(1);
-    }
-
-    // If doesn't start with +, add +263
-    if (!formatted.startsWith('+')) {
-      formatted = '+263' + formatted;
-    }
-
-    return formatted;
-  }
-
-  private maskPhoneNumber(phone: string): string {
-    if (phone.length < 4) return phone;
-    const last4 = phone.slice(-4);
-    const masked = '*'.repeat(phone.length - 4);
-    return masked + last4;
-  }
-
   async getCurrentUser(userId: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -476,13 +420,7 @@ class AuthService {
     return userWithoutPassword;
   }
 
-  async updateProfile(userId: string, data: {
-    firstName?: string;
-    lastName?: string;
-    email?: string;
-    companyName?: string;
-    profileImage?: string;
-  }) {
+  async updateProfile(userId: string, data: UpdateProfileData) {
     // If updating email, check if it's already taken
     if (data.email) {
       const existingUser = await prisma.user.findFirst({

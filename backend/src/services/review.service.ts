@@ -3,12 +3,7 @@
 
 import prisma from '@/config/database';
 import { loggers } from '@/utils/logger';
-
-export interface CreateReviewData {
-  tripId: string;
-  rating: number;
-  comment?: string;
-}
+import type { CreateReviewData } from '@/types/review.types';
 
 class ReviewService {
   // ============================================
@@ -112,7 +107,7 @@ class ReviewService {
     }
 
     // Calculate average rating
-    const totalRating = reviews.reduce((sum, review) => sum + review.rating, 0);
+    const totalRating = reviews.reduce((sum: number, review: { rating: number }) => sum + review.rating, 0);
     const averageRating = totalRating / reviews.length;
 
     // Update user's rating
@@ -306,14 +301,15 @@ class ReviewService {
 
     // Count ratings by star
     const breakdown = reviews.reduce(
-      (acc, review) => {
+      (acc: Record<number, number>, review: { rating: number }) => {
         acc[review.rating as keyof typeof acc]++;
         return acc;
       },
-      { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
+      { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 } as Record<number, number>
     );
 
     const totalRating = reviews.reduce((sum, review) => sum + review.rating, 0);
+    / 10;
     const averageRating = totalRating / reviews.length;
 
     return {

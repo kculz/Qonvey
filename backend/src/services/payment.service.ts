@@ -7,23 +7,7 @@ import { config } from '@/config/env';
 import { loggers } from '@/utils/logger';
 import { PlanType, PaymentMethod } from '@prisma/client';
 import { subscriptionService } from '@/services/subscription.service';
-
-export interface PaymentResult {
-  success: boolean;
-  reference?: string;
-  pollUrl?: string;
-  redirectUrl?: string;
-  message?: string;
-  error?: string;
-}
-
-export interface PaymentStatus {
-  paid: boolean;
-  amount: number;
-  reference: string;
-  status: string;
-  message?: string;
-}
+import type { PaymentResult, PaymentStatus } from '@/types/payment.types';
 
 class PaymentService {
   private paynow: Paynow | null = null;
