@@ -32,27 +32,27 @@ const models = {
   SavedSearch,
 };
 
-// Define associations
-Object.values(models).forEach((model) => {
-  if (model.associate) {
-    model.associate(models);
-  }
-});
+// // Define associations
+// Object.values(models).forEach((model) => {
+//   if (model.associate) {
+//     model.associate(models);
+//   }
+// });
 
-// Define complex associations that require multiple models
-User.associate(models);
-Subscription.associate(models);
-Load.associate(models);
-Bid.associate(models);
-Trip.associate(models);
-Vehicle.associate(models);
-Message.associate(models);
-Call.associate(models);
-Notification.associate(models);
-Review.associate(models);
-TeamMember.associate(models);
-LoadTemplate.associate(models);
-SavedSearch.associate(models);
+// // Define complex associations that require multiple models
+// User.associate(models);
+// Subscription.associate(models);
+// Load.associate(models);
+// Bid.associate(models);
+// Trip.associate(models);
+// Vehicle.associate(models);
+// Message.associate(models);
+// Call.associate(models);
+// Notification.associate(models);
+// Review.associate(models);
+// TeamMember.associate(models);
+// LoadTemplate.associate(models);
+// SavedSearch.associate(models);
 
 export { sequelize };
 export default models;
