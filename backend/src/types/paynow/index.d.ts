@@ -1,5 +1,3 @@
-// backend/src/types/paynow.d.ts
-
 declare module 'paynow' {
   /**
    * Represents the Paynow API client instance.
