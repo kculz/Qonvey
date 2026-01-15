@@ -9,7 +9,8 @@ export enum UserStatus {
 export enum UserRole {
   DRIVER = 'DRIVER',
   CARGO_OWNER = 'CARGO_OWNER',
-  ADMIN = 'ADMIN'
+  ADMIN = 'ADMIN',
+  FLEET_OWNER = 'FLEET_OWNER'
 }
 
 export interface AuthUser {

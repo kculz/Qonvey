@@ -22,11 +22,12 @@ import {
   getVehicleUsageHistory,
 } from '../controllers/vehicle.controller';
 import { authMiddleware, requireRole } from '@/middleware/auth.middleware';
+import { UserRole } from '@/models/user.model';
 
 const router = Router();
 
 // Vehicle CRUD
-router.post('/', authMiddleware, requireRole('DRIVER', 'FLEET_OWNER'), createVehicle);
+router.post('/', authMiddleware, requireRole(UserRole.DRIVER, UserRole.FLEET_OWNER), createVehicle);
 router.put('/:vehicleId', authMiddleware, updateVehicle);
 router.delete('/:vehicleId', authMiddleware, deleteVehicle);
 router.post('/:vehicleId/deactivate', authMiddleware, deactivateVehicle);

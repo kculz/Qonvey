@@ -22,11 +22,12 @@ import {
 } from '../controllers/load.controller';
 import { authMiddleware, optionalAuthMiddleware, requireRole } from '@/middleware/auth.middleware';
 import { loadPostingLimiter } from '@/middleware/rateLimiter.middleware';
+import { UserRole } from '@/models/user.model';
 
 const router = Router();
 
 // Load CRUD
-router.post('/', authMiddleware, requireRole('CARGO_OWNER', 'FLEET_OWNER'), loadPostingLimiter, createLoad);
+router.post('/', authMiddleware, requireRole(UserRole.CARGO_OWNER, UserRole.FLEET_OWNER), loadPostingLimiter, createLoad);
 router.put('/:loadId', authMiddleware, updateLoad);
 router.post('/:loadId/publish', authMiddleware, publishLoad);
 router.delete('/:loadId', authMiddleware, deleteLoad);

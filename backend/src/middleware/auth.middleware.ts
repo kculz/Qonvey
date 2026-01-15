@@ -5,7 +5,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from '@/config/env';
 import { loggers } from '@/utils/logger';
-import User from '@/models/user.model';
+import User, { UserRole } from '@/models/user.model';
 import Subscription from '@/models/subscription.model';
 
 // User status enum (from your User model)
@@ -17,12 +17,6 @@ export enum UserStatus {
   PENDING = 'PENDING'
 }
 
-// User role enum (from your User model)
-export enum UserRole {
-  DRIVER = 'DRIVER',
-  CARGO_OWNER = 'CARGO_OWNER',
-  ADMIN = 'ADMIN'
-}
 
 export interface AuthRequest extends Request {
   user?: {
@@ -172,8 +166,8 @@ export const optionalAuthMiddleware = async (
   }
 };
 
-export const requireRole = (allowedRoles: UserRole | UserRole[]) => {
-  return (req: Request, res: Response, next: NextFunction) => {
+export const requireRole = (...allowedRoles: UserRole[]) => {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
     // Check if user is authenticated
     if (!req.user) {
       return res.status(401).json({
@@ -182,11 +176,8 @@ export const requireRole = (allowedRoles: UserRole | UserRole[]) => {
       });
     }
 
-    // Normalize to array
-    const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
-    
     // Check if user has one of the allowed roles
-    if (!roles.includes(req.user.role)) {
+    if (!allowedRoles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Insufficient permissions'
