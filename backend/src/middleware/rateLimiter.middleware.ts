@@ -8,12 +8,32 @@ import Redis from 'ioredis';
 import { config } from '@/config/env';
 import { loggers } from '@/utils/logger';
 
+// type CustomRequest = Request & {
+//   user?: any;
+//   rateLimit?: any;
+// };
+
+// Define a custom interface locally
+interface CustomRequest extends Request {
+  user?: {
+    id: string;
+    role: any;
+    subscription?: any;
+  };
+  rateLimit?: {
+    limit: number;
+    current: number;
+    remaining: number;
+    resetTime: Date;
+  };
+}
+
 // Initialize Redis client for rate limiting
 let redisClient: Redis | undefined;
 
 if (config.redis.url) {
   redisClient = new Redis(config.redis.url, {
-    enableOfflineQueue: false,
+    enableOfflineQueue: true,
     maxRetriesPerRequest: 3,
   });
 
@@ -23,7 +43,7 @@ if (config.redis.url) {
 }
 
 // Custom key generator to identify users
-const keyGenerator = (req: Request): string => {
+const keyGenerator = (req: CustomRequest): string => {
   // If authenticated, use user ID
   if (req.user?.id) {
     return `user:${req.user.id}`;
@@ -39,7 +59,7 @@ const keyGenerator = (req: Request): string => {
 };
 
 // Custom handler for rate limit exceeded
-const rateLimitHandler = (req: Request, res: Response) => {
+const rateLimitHandler = (req: CustomRequest, res: Response) => {
   const key = keyGenerator(req);
   loggers.api.rateLimit(key, req.path);
   
@@ -51,7 +71,7 @@ const rateLimitHandler = (req: Request, res: Response) => {
 };
 
 // Skip rate limiting for certain conditions
-const skipRateLimit = (req: Request): boolean => {
+const skipRateLimit = (req: CustomRequest): boolean => {
   // Skip in test environment
   if (config.isTest) {
     return true;
@@ -79,8 +99,8 @@ export const generalLimiter = rateLimit({
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   // Use Redis store if available, otherwise use memory store
   ...(redisClient && {
@@ -101,8 +121,8 @@ export const authLimiter = rateLimit({
   message: 'Too many authentication attempts, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   ...(redisClient && {
     store: new RedisStore({
@@ -118,7 +138,7 @@ export const authLimiter = rateLimit({
 // ============================================
 export const loadPostingLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: async (req: Request) => {
+  max: async (req: CustomRequest) => {
     // Different limits based on subscription tier
     const subscription = req.user?.subscription;
     
@@ -135,8 +155,8 @@ export const loadPostingLimiter = rateLimit({
   message: 'Load posting limit reached for your subscription tier.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   ...(redisClient && {
     store: new RedisStore({
@@ -152,7 +172,7 @@ export const loadPostingLimiter = rateLimit({
 // ============================================
 export const bidPlacingLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: async (req: Request) => {
+  max: async (req: CustomRequest) => {
     const subscription = req.user?.subscription;
     
     if (!subscription || subscription.plan === 'FREE') {
@@ -168,8 +188,8 @@ export const bidPlacingLimiter = rateLimit({
   message: 'Bid placing limit reached for your subscription tier.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   ...(redisClient && {
     store: new RedisStore({
@@ -189,8 +209,8 @@ export const messageLimiter = rateLimit({
   message: 'Too many messages sent, please slow down.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   ...(redisClient && {
     store: new RedisStore({
@@ -210,8 +230,8 @@ export const uploadLimiter = rateLimit({
   message: 'Upload limit reached, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   ...(redisClient && {
     store: new RedisStore({
@@ -231,8 +251,8 @@ export const paymentLimiter = rateLimit({
   message: 'Too many payment attempts, please contact support.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   ...(redisClient && {
     store: new RedisStore({
@@ -252,8 +272,8 @@ export const otpLimiter = rateLimit({
   message: 'Too many OTP requests, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   ...(redisClient && {
     store: new RedisStore({
@@ -273,8 +293,8 @@ export const searchLimiter = rateLimit({
   message: 'Search limit reached, please slow down.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  handler: rateLimitHandler,
+  keyGenerator: keyGenerator as any,
+  handler: rateLimitHandler as any,
   skip: skipRateLimit,
   ...(redisClient && {
     store: new RedisStore({
@@ -307,7 +327,7 @@ export const resetRateLimit = async (userId: string, prefix: string = 'general')
 };
 
 // Utility to check remaining requests
-export const getRateLimitInfo = async (req: Request, prefix: string = 'general') => {
+export const getRateLimitInfo = async (req: CustomRequest, prefix: string = 'general') => {
   if (!redisClient) {
     return null;
   }

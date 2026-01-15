@@ -15,3 +15,10 @@ declare global {
     }
   }
 }
+
+interface RateLimitInfo {
+  limit: number;
+  current: number;
+  remaining: number;
+  resetTime: Date;
+}
