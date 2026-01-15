@@ -1,16 +1,30 @@
-// Call Management Service
-// Location: backend/src/services/call.service.ts
+// backend/src/services/call.service.ts
 
-import prisma from '@/config/database';
-import { loggers } from '@/utils/logger';
-import { notificationService } from '@/services/notification.service';
-import { CallStatus, CallType } from '@prisma/client';
+import { Op } from 'sequelize';
+import { loggers } from '../utils/logger';
+import { notificationService } from './notification.service';
 import type {
   InitiateCallData,
-  CallResponse,
   CallHistoryResponse,
   CallStats,
-} from '@/types/call.types';
+} from '../types/call.types';
+import User from '@/models/user.model';
+import Call from '@/models/call.model';
+
+export enum CallStatus {
+  INITIATED = 'INITIATED',
+  RINGING = 'RINGING',
+  ANSWERED = 'ANSWERED',
+  REJECTED = 'REJECTED',
+  MISSED = 'MISSED',
+  ENDED = 'ENDED',
+  CANCELLED = 'CANCELLED',
+}
+
+export enum CallType {
+  AUDIO = 'AUDIO',
+  VIDEO = 'VIDEO',
+}
 
 class CallService {
   // ============================================
@@ -20,8 +34,8 @@ class CallService {
   async initiateCall(callerId: string, data: InitiateCallData) {
     // Verify users exist
     const [caller, receiver] = await Promise.all([
-      prisma.user.findUnique({ where: { id: callerId } }),
-      prisma.user.findUnique({ where: { id: data.receiverId } }),
+      User.findByPk(callerId),
+      User.findByPk(data.receiverId),
     ]);
 
     if (!caller || !receiver) {
@@ -33,11 +47,19 @@ class CallService {
     }
 
     // Check if there's an active call between these users
-    const activeCall = await prisma.call.findFirst({
+    const activeCall = await Call.findOne({
       where: {
-        OR: [
-          { callerId, receiverId: data.receiverId, status: { in: [CallStatus.INITIATED, CallStatus.RINGING, CallStatus.ANSWERED] } },
-          { callerId: data.receiverId, receiverId: callerId, status: { in: [CallStatus.INITIATED, CallStatus.RINGING, CallStatus.ANSWERED] } },
+        [Op.or]: [
+          {
+            caller_id: callerId,
+            receiver_id: data.receiverId,
+            status: { [Op.in]: [CallStatus.INITIATED, CallStatus.RINGING, CallStatus.ANSWERED] },
+          },
+          {
+            caller_id: data.receiverId,
+            receiver_id: callerId,
+            status: { [Op.in]: [CallStatus.INITIATED, CallStatus.RINGING, CallStatus.ANSWERED] },
+          },
         ],
       },
     });
@@ -47,43 +69,39 @@ class CallService {
     }
 
     // Create call
-    const call = await prisma.call.create({
-      data: {
-        callerId,
-        receiverId: data.receiverId,
-        type: data.type,
-        status: CallStatus.INITIATED,
-        loadId: data.loadId,
-        bidId: data.bidId,
-      },
-      include: {
-        caller: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-            phoneNumber: true,
-          },
+    const call = await Call.create({
+      caller_id: callerId,
+      receiver_id: data.receiverId,
+      type: data.type,
+      status: CallStatus.INITIATED,
+      load_id: data.loadId,
+      bid_id: data.bidId,
+    } as any);
+
+    // Fetch call with relationships
+    const callWithRelations = await Call.findByPk(call.id, {
+      include: [
+        {
+          association: 'caller',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image', 'phone_number'],
         },
-        receiver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-            phoneNumber: true,
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image', 'phone_number'],
         },
-      },
+      ],
     });
+
+    if (!callWithRelations) {
+      throw new Error('Failed to create call');
+    }
 
     loggers.info('Call initiated', { callId: call.id, callerId, receiverId: data.receiverId });
 
     // Send push notification to receiver
     await notificationService.sendPushNotification(data.receiverId, {
       title: `Incoming ${data.type === CallType.VIDEO ? 'Video' : 'Audio'} Call`,
-      body: `${caller.firstName} ${caller.lastName} is calling you`,
+      body: `${caller.first_name} ${caller.last_name} is calling you`,
       type: 'INCOMING_CALL',
       data: {
         callId: call.id,
@@ -94,37 +112,28 @@ class CallService {
       },
     });
 
-    return call;
+    return callWithRelations;
   }
 
   async answerCall(callId: string, receiverId: string) {
-    const call = await prisma.call.findUnique({
-      where: { id: callId },
-      include: {
-        caller: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+    const call = await Call.findByPk(callId, {
+      include: [
+        {
+          association: 'caller',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        receiver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-      },
+      ],
     });
 
     if (!call) {
       throw new Error('Call not found');
     }
 
-    if (call.receiverId !== receiverId) {
+    if (call.receiver_id !== receiverId) {
       throw new Error('Unauthorized to answer this call');
     }
 
@@ -132,55 +141,32 @@ class CallService {
       throw new Error('Call cannot be answered in current status');
     }
 
-    const updatedCall = await prisma.call.update({
-      where: { id: callId },
-      data: {
-        status: CallStatus.ANSWERED,
-        startedAt: new Date(),
-      },
-      include: {
-        caller: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
-        },
-      },
+    await call.update({
+      status: CallStatus.ANSWERED,
+      started_at: new Date(),
     });
 
     loggers.info('Call answered', { callId, receiverId });
 
     // Notify caller that call was answered
-    await notificationService.sendPushNotification(call.callerId, {
+    await notificationService.sendPushNotification(call.caller_id, {
       title: 'Call Answered',
-      body: `${call.receiver.firstName} ${call.receiver.lastName} answered your call`,
+      body: `${call.receiver.first_name} ${call.receiver.last_name} answered your call`,
       type: 'CALL_ANSWERED',
       data: { callId },
     });
 
-    return updatedCall;
+    return call;
   }
 
   async rejectCall(callId: string, receiverId: string) {
-    const call = await prisma.call.findUnique({
-      where: { id: callId },
-    });
+    const call = await Call.findByPk(callId);
 
     if (!call) {
       throw new Error('Call not found');
     }
 
-    if (call.receiverId !== receiverId) {
+    if (call.receiver_id !== receiverId) {
       throw new Error('Unauthorized to reject this call');
     }
 
@@ -188,29 +174,24 @@ class CallService {
       throw new Error('Call already ended');
     }
 
-    const updatedCall = await prisma.call.update({
-      where: { id: callId },
-      data: {
-        status: CallStatus.REJECTED,
-        endedAt: new Date(),
-      },
+    await call.update({
+      status: CallStatus.REJECTED,
+      ended_at: new Date(),
     });
 
     loggers.info('Call rejected', { callId, receiverId });
 
-    return updatedCall;
+    return call;
   }
 
   async endCall(callId: string, userId: string) {
-    const call = await prisma.call.findUnique({
-      where: { id: callId },
-    });
+    const call = await Call.findByPk(callId);
 
     if (!call) {
       throw new Error('Call not found');
     }
 
-    if (call.callerId !== userId && call.receiverId !== userId) {
+    if (call.caller_id !== userId && call.receiver_id !== userId) {
       throw new Error('Unauthorized to end this call');
     }
 
@@ -220,35 +201,30 @@ class CallService {
 
     // Calculate duration if call was answered
     let duration: number | undefined;
-    if (call.startedAt) {
+    if (call.started_at) {
       const endTime = new Date();
-      duration = Math.floor((endTime.getTime() - call.startedAt.getTime()) / 1000);
+      duration = Math.floor((endTime.getTime() - call.started_at.getTime()) / 1000);
     }
 
-    const updatedCall = await prisma.call.update({
-      where: { id: callId },
-      data: {
-        status: CallStatus.ENDED,
-        endedAt: new Date(),
-        duration,
-      },
+    await call.update({
+      status: CallStatus.ENDED,
+      ended_at: new Date(),
+      duration,
     });
 
     loggers.info('Call ended', { callId, userId, duration });
 
-    return updatedCall;
+    return call;
   }
 
   async cancelCall(callId: string, callerId: string) {
-    const call = await prisma.call.findUnique({
-      where: { id: callId },
-    });
+    const call = await Call.findByPk(callId);
 
     if (!call) {
       throw new Error('Call not found');
     }
 
-    if (call.callerId !== callerId) {
+    if (call.caller_id !== callerId) {
       throw new Error('Unauthorized to cancel this call');
     }
 
@@ -256,25 +232,24 @@ class CallService {
       throw new Error('Call cannot be cancelled in current status');
     }
 
-    const updatedCall = await prisma.call.update({
-      where: { id: callId },
-      data: {
-        status: CallStatus.CANCELLED,
-        endedAt: new Date(),
-      },
+    await call.update({
+      status: CallStatus.CANCELLED,
+      ended_at: new Date(),
     });
 
     loggers.info('Call cancelled', { callId, callerId });
 
-    return updatedCall;
+    return call;
   }
 
   async updateCallStatus(callId: string, status: CallStatus) {
-    const call = await prisma.call.update({
-      where: { id: callId },
-      data: { status },
-    });
+    const call = await Call.findByPk(callId);
+    
+    if (!call) {
+      throw new Error('Call not found');
+    }
 
+    await call.update({ status });
     return call;
   }
 
@@ -283,35 +258,24 @@ class CallService {
   // ============================================
 
   async getCall(callId: string, userId: string) {
-    const call = await prisma.call.findUnique({
-      where: { id: callId },
-      include: {
-        caller: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-            phoneNumber: true,
-          },
+    const call = await Call.findByPk(callId, {
+      include: [
+        {
+          association: 'caller',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image', 'phone_number'],
         },
-        receiver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-            phoneNumber: true,
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image', 'phone_number'],
         },
-      },
+      ],
     });
 
     if (!call) {
       throw new Error('Call not found');
     }
 
-    if (call.callerId !== userId && call.receiverId !== userId) {
+    if (call.caller_id !== userId && call.receiver_id !== userId) {
       throw new Error('Unauthorized');
     }
 
@@ -319,140 +283,96 @@ class CallService {
   }
 
   async getCallHistory(userId: string, page = 1, limit = 50): Promise<CallHistoryResponse> {
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    const [calls, total] = await Promise.all([
-      prisma.call.findMany({
-        where: {
-          OR: [
-            { callerId: userId },
-            { receiverId: userId },
-          ],
+    const { count, rows: calls } = await Call.findAndCountAll({
+      where: {
+        [Op.or]: [
+          { caller_id: userId },
+          { receiver_id: userId },
+        ],
+      },
+      include: [
+        {
+          association: 'caller',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        include: {
-          caller: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              profileImage: true,
-            },
-          },
-          receiver: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              profileImage: true,
-            },
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      prisma.call.count({
-        where: {
-          OR: [
-            { callerId: userId },
-            { receiverId: userId },
-          ],
-        },
-      }),
-    ]);
+      ],
+      order: [['created_at', 'DESC']],
+      offset,
+      limit,
+    });
 
     return {
       calls,
       pagination: {
-        total,
+        total: count,
         page,
         limit,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(count / limit),
       },
     };
   }
 
   async getActiveCalls(userId: string) {
-    return await prisma.call.findMany({
+    return await Call.findAll({
       where: {
-        OR: [
-          { callerId: userId },
-          { receiverId: userId },
+        [Op.or]: [
+          { caller_id: userId },
+          { receiver_id: userId },
         ],
-        status: { in: [CallStatus.INITIATED, CallStatus.RINGING, CallStatus.ANSWERED] },
+        status: { [Op.in]: [CallStatus.INITIATED, CallStatus.RINGING, CallStatus.ANSWERED] },
       },
-      include: {
-        caller: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+      include: [
+        {
+          association: 'caller',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        receiver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-      },
-      orderBy: { createdAt: 'desc' },
+      ],
+      order: [['created_at', 'DESC']],
     });
   }
 
   async getCallsWithUser(userId: string, otherUserId: string, page = 1, limit = 50) {
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    const [calls, total] = await Promise.all([
-      prisma.call.findMany({
-        where: {
-          OR: [
-            { callerId: userId, receiverId: otherUserId },
-            { callerId: otherUserId, receiverId: userId },
-          ],
+    const { count, rows: calls } = await Call.findAndCountAll({
+      where: {
+        [Op.or]: [
+          { caller_id: userId, receiver_id: otherUserId },
+          { caller_id: otherUserId, receiver_id: userId },
+        ],
+      },
+      include: [
+        {
+          association: 'caller',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        include: {
-          caller: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              profileImage: true,
-            },
-          },
-          receiver: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              profileImage: true,
-            },
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      prisma.call.count({
-        where: {
-          OR: [
-            { callerId: userId, receiverId: otherUserId },
-            { callerId: otherUserId, receiverId: userId },
-          ],
-        },
-      }),
-    ]);
+      ],
+      order: [['created_at', 'DESC']],
+      offset,
+      limit,
+    });
 
     return {
       calls,
       pagination: {
-        total,
+        total: count,
         page,
         limit,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(count / limit),
       },
     };
   }
@@ -462,49 +382,55 @@ class CallService {
   // ============================================
 
   async getCallStats(userId: string): Promise<CallStats> {
-    const [total, answered, missed, rejected] = await Promise.all([
-      prisma.call.count({
+    const [
+      total,
+      answered,
+      missed,
+      rejected
+    ] = await Promise.all([
+      Call.count({
         where: {
-          OR: [
-            { callerId: userId },
-            { receiverId: userId },
+          [Op.or]: [
+            { caller_id: userId },
+            { receiver_id: userId },
           ],
         },
       }),
-      prisma.call.count({
+      Call.count({
         where: {
-          OR: [
-            { callerId: userId, status: CallStatus.ENDED },
-            { receiverId: userId, status: CallStatus.ENDED },
+          [Op.or]: [
+            { caller_id: userId, status: CallStatus.ENDED },
+            { receiver_id: userId, status: CallStatus.ENDED },
           ],
-          startedAt: { not: null },
+          started_at: { [Op.ne]: null },
         },
       }),
-      prisma.call.count({
+      Call.count({
         where: {
-          receiverId: userId,
+          receiver_id: userId,
           status: CallStatus.MISSED,
         },
       }),
-      prisma.call.count({
+      Call.count({
         where: {
-          receiverId: userId,
+          receiver_id: userId,
           status: CallStatus.REJECTED,
         },
       }),
     ]);
 
     // Calculate total duration
-    const callsWithDuration = await prisma.call.findMany({
+    const callsWithDuration = await Call.findAll({
       where: {
-        OR: [
-          { callerId: userId },
-          { receiverId: userId },
+        [Op.or]: [
+          { caller_id: userId },
+          { receiver_id: userId },
         ],
         status: CallStatus.ENDED,
-        duration: { not: null },
+        duration: { [Op.ne]: null },
       },
-      select: { duration: true },
+      attributes: ['duration'],
+      raw: true,
     });
 
     const totalDuration = callsWithDuration.reduce((sum, call) => sum + (call.duration || 0), 0);
@@ -526,26 +452,91 @@ class CallService {
 
   async markMissedCalls() {
     // Mark calls that were initiated but never answered as missed
-    const result = await prisma.call.updateMany({
-      where: {
-        status: { in: [CallStatus.INITIATED, CallStatus.RINGING] },
-        createdAt: {
-          lt: new Date(Date.now() - 5 * 60 * 1000), // 5 minutes ago
-        },
-      },
-      data: {
+    const result = await Call.update(
+      {
         status: CallStatus.MISSED,
-        endedAt: new Date(),
+        ended_at: new Date(),
       },
-    });
+      {
+        where: {
+          status: { [Op.in]: [CallStatus.INITIATED, CallStatus.RINGING] },
+          created_at: {
+            [Op.lt]: new Date(Date.now() - 5 * 60 * 1000), // 5 minutes ago
+          },
+        },
+      }
+    );
 
-    if (result.count > 0) {
-      loggers.info(`Marked ${result.count} calls as missed`);
+    if (result[0] > 0) {
+      loggers.info(`Marked ${result[0]} calls as missed`);
     }
 
-    return result;
+    return result[0];
+  }
+
+  // ============================================
+  // NEW METHODS FOR SEQUELIZE
+  // ============================================
+
+  async getRecentCalls(userId: string, limit = 20) {
+    return await Call.findAll({
+      where: {
+        [Op.or]: [
+          { caller_id: userId },
+          { receiver_id: userId },
+        ],
+      },
+      include: [
+        {
+          association: 'caller',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
+        },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
+        },
+      ],
+      order: [['created_at', 'DESC']],
+      limit,
+    });
+  }
+
+  async getCallById(callId: string) {
+    return await Call.findByPk(callId, {
+      include: [
+        {
+          association: 'caller',
+        },
+        {
+          association: 'receiver',
+        },
+        {
+          association: 'load',
+          attributes: ['id', 'title'],
+        },
+        {
+          association: 'bid',
+          attributes: ['id', 'proposed_price'],
+        },
+      ],
+    });
+  }
+
+  async updateCallDuration(callId: string) {
+    const call = await Call.findByPk(callId);
+    
+    if (!call) {
+      throw new Error('Call not found');
+    }
+
+    if (call.started_at && call.ended_at) {
+      const duration = Math.floor((call.ended_at.getTime() - call.started_at.getTime()) / 1000);
+      await call.update({ duration });
+      return duration;
+    }
+
+    return null;
   }
 }
 
 export const callService = new CallService();
-

@@ -1,11 +1,32 @@
-// Complete Subscription Service
+// Complete Subscription Service - Sequelize Version (Fixed)
 // Location: backend/src/services/subscription.service.ts
 
-import prisma from '@/config/database';
+import { Op } from 'sequelize';
 import { config } from '@/config/env';
 import { loggers } from '@/utils/logger';
-import { PlanType, SubscriptionStatus } from '@prisma/client';
 import type { FeatureAccess, UsageLimit } from '@/types/subscription.types';
+import Subscription from '@/models/subscription.model';
+import User from '@/models/user.model';
+import Vehicle from '@/models/vehicle.model';
+import TeamMember from '@/models/team-member.model';
+import Load from '@/models/load.model';
+import Bid from '@/models/bid.model';
+import Trip from '@/models/trip.model';
+
+// Enums (from your Prisma schema)
+export enum PlanType {
+  FREE = 'FREE',
+  STARTER = 'STARTER',
+  PROFESSIONAL = 'PROFESSIONAL',
+  BUSINESS = 'BUSINESS'
+}
+
+export enum SubscriptionStatus {
+  TRIAL = 'TRIAL',
+  ACTIVE = 'ACTIVE',
+  CANCELLED = 'CANCELLED',
+  EXPIRED = 'EXPIRED'
+}
 
 class SubscriptionService {
   // ============================================
@@ -13,19 +34,12 @@ class SubscriptionService {
   // ============================================
 
   async getUserSubscription(userId: string) {
-    const subscription = await prisma.subscription.findUnique({
-      where: { userId },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            role: true,
-          },
-        },
-      },
+    const subscription = await Subscription.findOne({
+      where: { user_id: userId },
+      include: [{
+        association: 'user',
+        attributes: ['id', 'first_name', 'last_name', 'email', 'role'],
+      }],
     });
 
     if (!subscription) {
@@ -33,20 +47,34 @@ class SubscriptionService {
     }
 
     // Check if trial has expired
-    if (subscription.status === 'TRIAL' && subscription.trialEndDate) {
-      if (new Date() > subscription.trialEndDate) {
+    if (subscription.status === SubscriptionStatus.TRIAL && subscription.trial_end_date) {
+      if (new Date() > subscription.trial_end_date) {
         await this.expireTrial(userId);
-        subscription.status = 'EXPIRED';
-        subscription.plan = 'FREE';
+        // We need to fetch the updated subscription after expiration
+        const updatedSubscription = await Subscription.findOne({
+          where: { user_id: userId },
+        });
+        if (updatedSubscription) {
+          updatedSubscription.status = SubscriptionStatus.EXPIRED;
+          updatedSubscription.plan = PlanType.FREE;
+          return updatedSubscription;
+        }
       }
     }
 
     // Check if subscription has expired
-    if (subscription.status === 'ACTIVE' && subscription.endDate) {
-      if (new Date() > subscription.endDate) {
+    if (subscription.status === SubscriptionStatus.ACTIVE && subscription.end_date) {
+      if (new Date() > subscription.end_date) {
         await this.expireSubscription(userId);
-        subscription.status = 'EXPIRED';
-        subscription.plan = 'FREE';
+        // We need to fetch the updated subscription after expiration
+        const updatedSubscription = await Subscription.findOne({
+          where: { user_id: userId },
+        });
+        if (updatedSubscription) {
+          updatedSubscription.status = SubscriptionStatus.EXPIRED;
+          updatedSubscription.plan = PlanType.FREE;
+          return updatedSubscription;
+        }
       }
     }
 
@@ -57,16 +85,14 @@ class SubscriptionService {
     const trialEndDate = new Date();
     trialEndDate.setDate(trialEndDate.getDate() + config.subscription.trialDays);
 
-    const subscription = await prisma.subscription.create({
-      data: {
-        userId,
-        plan: 'STARTER',
-        status: 'TRIAL',
-        trialStartDate: new Date(),
-        trialEndDate,
-        hasUsedTrial: true,
-        amount: 0,
-      },
+    const subscription = await Subscription.create({
+      user_id: userId,
+      plan: PlanType.STARTER,
+      status: SubscriptionStatus.TRIAL,
+      trial_start_date: new Date(),
+      trial_end_date: trialEndDate,
+      has_used_trial: true,
+      amount: 0,
     });
 
     loggers.subscription.created(userId, 'STARTER (TRIAL)');
@@ -77,59 +103,52 @@ class SubscriptionService {
     const currentSubscription = await this.getUserSubscription(userId);
 
     const prices = {
-      STARTER: config.subscription.prices.starter,
-      PROFESSIONAL: config.subscription.prices.professional,
-      BUSINESS: config.subscription.prices.business,
-      FREE: 0,
+      [PlanType.STARTER]: config.subscription.prices.starter,
+      [PlanType.PROFESSIONAL]: config.subscription.prices.professional,
+      [PlanType.BUSINESS]: config.subscription.prices.business,
+      [PlanType.FREE]: 0,
     };
 
     const startDate = new Date();
     const endDate = new Date();
     endDate.setMonth(endDate.getMonth() + 1);
 
-    const subscription = await prisma.subscription.update({
-      where: { userId },
-      data: {
-        plan: newPlan,
-        status: 'ACTIVE',
-        amount: prices[newPlan],
-        startDate,
-        endDate,
-        nextBillingDate: endDate,
-        lastPayment: new Date(),
-        paymentMethod: paymentReference ? 'ECOCASH' : undefined,
-      },
+    await currentSubscription.update({
+      plan: newPlan,
+      status: SubscriptionStatus.ACTIVE,
+      amount: prices[newPlan],
+      start_date: startDate,
+      end_date: endDate,
+      next_billing_date: endDate,
+      last_payment: new Date(),
+      ...(paymentReference && { payment_method: 'ECOCASH' }),
     });
 
     loggers.subscription.upgraded(userId, currentSubscription.plan, newPlan);
-    return subscription;
+    return currentSubscription;
   }
 
   async downgradePlan(userId: string, reason?: string) {
     const currentSubscription = await this.getUserSubscription(userId);
 
-    const subscription = await prisma.subscription.update({
-      where: { userId },
-      data: {
-        plan: 'FREE',
-        status: 'ACTIVE',
-        amount: 0,
-        endDate: null,
-        nextBillingDate: null,
-      },
+    await currentSubscription.update({
+      plan: PlanType.FREE,
+      status: SubscriptionStatus.ACTIVE,
+      amount: 0,
+      end_date: null,
+      next_billing_date: null,
     });
 
-    loggers.subscription.cancelled(userId, currentSubscription.plan, reason);
-    return subscription;
+    // loggers.subscription.downgraded(userId, currentSubscription.plan, PlanType.FREE, reason);
+    return currentSubscription;
   }
 
   async cancelSubscription(userId: string, reason?: string) {
-    const subscription = await prisma.subscription.update({
-      where: { userId },
-      data: {
-        status: 'CANCELLED',
-        autoRenew: false,
-      },
+    const subscription = await this.getUserSubscription(userId);
+    
+    await subscription.update({
+      status: SubscriptionStatus.CANCELLED,
+      auto_renew: false,
     });
 
     loggers.subscription.cancelled(userId, subscription.plan, reason);
@@ -137,13 +156,18 @@ class SubscriptionService {
   }
 
   async expireTrial(userId: string) {
-    const subscription = await prisma.subscription.update({
-      where: { userId },
-      data: {
-        status: 'EXPIRED',
-        plan: 'FREE',
-        amount: 0,
-      },
+    const subscription = await Subscription.findOne({
+      where: { user_id: userId },
+    });
+
+    if (!subscription) {
+      throw new Error('Subscription not found');
+    }
+
+    await subscription.update({
+      status: SubscriptionStatus.EXPIRED,
+      plan: PlanType.FREE,
+      amount: 0,
     });
 
     loggers.subscription.expired(userId, 'TRIAL');
@@ -153,17 +177,14 @@ class SubscriptionService {
   async expireSubscription(userId: string) {
     const currentSubscription = await this.getUserSubscription(userId);
 
-    const subscription = await prisma.subscription.update({
-      where: { userId },
-      data: {
-        status: 'EXPIRED',
-        plan: 'FREE',
-        amount: 0,
-      },
+    await currentSubscription.update({
+      status: SubscriptionStatus.EXPIRED,
+      plan: PlanType.FREE,
+      amount: 0,
     });
 
     loggers.subscription.expired(userId, currentSubscription.plan);
-    return subscription;
+    return currentSubscription;
   }
 
   async renewSubscription(userId: string, paymentReference: string) {
@@ -172,19 +193,16 @@ class SubscriptionService {
     const endDate = new Date();
     endDate.setMonth(endDate.getMonth() + 1);
 
-    const subscription = await prisma.subscription.update({
-      where: { userId },
-      data: {
-        status: 'ACTIVE',
-        startDate: new Date(),
-        endDate,
-        nextBillingDate: endDate,
-        lastPayment: new Date(),
-      },
+    await currentSubscription.update({
+      status: SubscriptionStatus.ACTIVE,
+      start_date: new Date(),
+      end_date: endDate,
+      next_billing_date: endDate,
+      last_payment: new Date(),
     });
 
     loggers.subscription.paymentSuccess(userId, currentSubscription.amount, currentSubscription.plan);
-    return subscription;
+    return currentSubscription;
   }
 
   // ============================================
@@ -198,7 +216,7 @@ class SubscriptionService {
 
   getPlanFeatures(plan: PlanType): FeatureAccess {
     const features: Record<PlanType, FeatureAccess> = {
-      FREE: {
+      [PlanType.FREE]: {
         priorityListing: false,
         featuredListing: false,
         topPlacement: false,
@@ -217,7 +235,7 @@ class SubscriptionService {
         maxVehicles: 1,
         maxTeamMembers: 0,
       },
-      STARTER: {
+      [PlanType.STARTER]: {
         priorityListing: true,
         featuredListing: false,
         topPlacement: false,
@@ -236,7 +254,7 @@ class SubscriptionService {
         maxVehicles: 1,
         maxTeamMembers: 0,
       },
-      PROFESSIONAL: {
+      [PlanType.PROFESSIONAL]: {
         priorityListing: true,
         featuredListing: true,
         topPlacement: false,
@@ -255,7 +273,7 @@ class SubscriptionService {
         maxVehicles: 5,
         maxTeamMembers: 0,
       },
-      BUSINESS: {
+      [PlanType.BUSINESS]: {
         priorityListing: true,
         featuredListing: true,
         topPlacement: true,
@@ -290,8 +308,8 @@ class SubscriptionService {
     await this.resetMonthlyUsageIfNeeded(subscription.id);
 
     // Get updated subscription
-    const updatedSubscription = await prisma.subscription.findUnique({
-      where: { userId },
+    const updatedSubscription = await Subscription.findOne({
+      where: { user_id: userId },
     });
 
     if (!updatedSubscription) {
@@ -299,22 +317,27 @@ class SubscriptionService {
     }
 
     // Check subscription status
-    if (updatedSubscription.status === 'EXPIRED' || updatedSubscription.status === 'CANCELLED') {
+    if (updatedSubscription.status === SubscriptionStatus.EXPIRED || 
+        updatedSubscription.status === SubscriptionStatus.CANCELLED) {
       return { allowed: false, reason: 'Subscription expired or cancelled' };
     }
 
     // FREE tier - 1 load per month
-    if (updatedSubscription.plan === 'FREE') {
-      if (updatedSubscription.loadsPostedThisMonth >= 1) {
+    if (updatedSubscription.plan === PlanType.FREE) {
+      if (updatedSubscription.loads_posted_this_month >= 1) {
         return {
           allowed: false,
           reason: 'Free tier allows 1 load per month',
           remaining: 0,
           limit: 1,
-          upgradeTo: 'STARTER',
+          upgradeTo: PlanType.STARTER,
         };
       }
-      return { allowed: true, remaining: 1 - updatedSubscription.loadsPostedThisMonth, limit: 1 };
+      return { 
+        allowed: true, 
+        remaining: 1 - updatedSubscription.loads_posted_this_month, 
+        limit: 1 
+      };
     }
 
     // Paid tiers - unlimited loads
@@ -328,8 +351,8 @@ class SubscriptionService {
     await this.resetMonthlyUsageIfNeeded(subscription.id);
 
     // Get updated subscription
-    const updatedSubscription = await prisma.subscription.findUnique({
-      where: { userId },
+    const updatedSubscription = await Subscription.findOne({
+      where: { user_id: userId },
     });
 
     if (!updatedSubscription) {
@@ -337,22 +360,27 @@ class SubscriptionService {
     }
 
     // Check subscription status
-    if (updatedSubscription.status === 'EXPIRED' || updatedSubscription.status === 'CANCELLED') {
+    if (updatedSubscription.status === SubscriptionStatus.EXPIRED || 
+        updatedSubscription.status === SubscriptionStatus.CANCELLED) {
       return { allowed: false, reason: 'Subscription expired or cancelled' };
     }
 
     // FREE tier - 3 bids per month
-    if (updatedSubscription.plan === 'FREE') {
-      if (updatedSubscription.bidsPlacedThisMonth >= 3) {
+    if (updatedSubscription.plan === PlanType.FREE) {
+      if (updatedSubscription.bids_placed_this_month >= 3) {
         return {
           allowed: false,
           reason: 'Free tier allows 3 bids per month',
           remaining: 0,
           limit: 3,
-          upgradeTo: 'STARTER',
+          upgradeTo: PlanType.STARTER,
         };
       }
-      return { allowed: true, remaining: 3 - updatedSubscription.bidsPlacedThisMonth, limit: 3 };
+      return { 
+        allowed: true, 
+        remaining: 3 - updatedSubscription.bids_placed_this_month, 
+        limit: 3 
+      };
     }
 
     // Paid tiers - unlimited bids
@@ -363,14 +391,14 @@ class SubscriptionService {
     const subscription = await this.getUserSubscription(userId);
     const features = this.getPlanFeatures(subscription.plan);
 
-    const vehicleCount = await prisma.vehicle.count({
-      where: { ownerId: userId, isActive: true },
+    const vehicleCount = await Vehicle.count({
+      where: { owner_id: userId, is_active: true },
     });
 
     if (vehicleCount >= features.maxVehicles) {
-      const nextTier = subscription.plan === 'FREE' || subscription.plan === 'STARTER' 
-        ? 'PROFESSIONAL' 
-        : 'BUSINESS';
+      const nextTier = subscription.plan === PlanType.FREE || subscription.plan === PlanType.STARTER 
+        ? PlanType.PROFESSIONAL 
+        : PlanType.BUSINESS;
       
       return {
         allowed: false,
@@ -392,16 +420,16 @@ class SubscriptionService {
     const subscription = await this.getUserSubscription(userId);
     const features = this.getPlanFeatures(subscription.plan);
 
-    if (subscription.plan !== 'BUSINESS') {
+    if (subscription.plan !== PlanType.BUSINESS) {
       return {
         allowed: false,
         reason: 'Team management is available on BUSINESS plan only',
-        upgradeTo: 'BUSINESS',
+        upgradeTo: PlanType.BUSINESS,
       };
     }
 
-    const teamCount = await prisma.teamMember.count({
-      where: { businessOwnerId: userId, isActive: true },
+    const teamCount = await TeamMember.count({
+      where: { business_owner_id: userId, is_active: true },
     });
 
     if (teamCount >= features.maxTeamMembers) {
@@ -428,48 +456,33 @@ class SubscriptionService {
     const subscription = await this.getUserSubscription(userId);
     await this.resetMonthlyUsageIfNeeded(subscription.id);
 
-    await prisma.subscription.update({
-      where: { userId },
-      data: {
-        loadsPostedThisMonth: { increment: 1 },
-      },
-    });
+    await subscription.increment('loads_posted_this_month');
   }
 
   async recordBidPlaced(userId: string) {
     const subscription = await this.getUserSubscription(userId);
     await this.resetMonthlyUsageIfNeeded(subscription.id);
 
-    await prisma.subscription.update({
-      where: { userId },
-      data: {
-        bidsPlacedThisMonth: { increment: 1 },
-      },
-    });
+    await subscription.increment('bids_placed_this_month');
   }
 
   async resetMonthlyUsageIfNeeded(subscriptionId: string) {
-    const subscription = await prisma.subscription.findUnique({
-      where: { id: subscriptionId },
-    });
+    const subscription = await Subscription.findByPk(subscriptionId);
 
     if (!subscription) return;
 
     const now = new Date();
-    const lastResetDate = subscription.lastResetDate || subscription.startDate || now;
+    const lastResetDate = subscription.last_reset_date || subscription.start_date || now;
 
     // Check if it's a new month
     if (
       lastResetDate.getFullYear() !== now.getFullYear() ||
       lastResetDate.getMonth() !== now.getMonth()
     ) {
-      await prisma.subscription.update({
-        where: { id: subscriptionId },
-        data: {
-          loadsPostedThisMonth: 0,
-          bidsPlacedThisMonth: 0,
-          lastResetDate: now,
-        },
+      await subscription.update({
+        loads_posted_this_month: 0,
+        bids_placed_this_month: 0,
+        last_reset_date: now,
       });
 
       loggers.info('Monthly usage reset', { subscriptionId });
@@ -483,55 +496,262 @@ class SubscriptionService {
   async getSubscriptionStats(userId: string) {
     const subscription = await this.getUserSubscription(userId);
 
-    const totalLoads = await prisma.load.count({
-      where: { ownerId: userId },
-    });
-
-    const totalBids = await prisma.bid.count({
-      where: { driverId: userId },
-    });
-
-    const completedTrips = await prisma.trip.count({
-      where: { driverId: userId, status: 'COMPLETED' },
-    });
+    const [totalLoads, totalBids, completedTrips] = await Promise.all([
+      Load.count({
+        where: { owner_id: userId },
+      }),
+      Bid.count({
+        where: { driver_id: userId },
+      }),
+      Trip.count({
+        where: { driver_id: userId, status: 'COMPLETED' },
+      }),
+    ]);
 
     return {
       plan: subscription.plan,
       status: subscription.status,
-      loadsPostedThisMonth: subscription.loadsPostedThisMonth,
-      bidsPlacedThisMonth: subscription.bidsPlacedThisMonth,
+      loadsPostedThisMonth: subscription.loads_posted_this_month,
+      bidsPlacedThisMonth: subscription.bids_placed_this_month,
       totalLoads,
       totalBids,
       completedTrips,
-      trialEndsAt: subscription.trialEndDate,
-      nextBillingDate: subscription.nextBillingDate,
+      trialEndsAt: subscription.trial_end_date,
+      nextBillingDate: subscription.next_billing_date,
       amount: subscription.amount,
     };
   }
 
   async getPlanPricing() {
     return {
-      FREE: {
+      [PlanType.FREE]: {
         price: 0,
         currency: 'USD',
-        features: this.getPlanFeatures('FREE'),
+        features: this.getPlanFeatures(PlanType.FREE),
       },
-      STARTER: {
+      [PlanType.STARTER]: {
         price: config.subscription.prices.starter,
         currency: 'USD',
-        features: this.getPlanFeatures('STARTER'),
+        features: this.getPlanFeatures(PlanType.STARTER),
       },
-      PROFESSIONAL: {
+      [PlanType.PROFESSIONAL]: {
         price: config.subscription.prices.professional,
         currency: 'USD',
-        features: this.getPlanFeatures('PROFESSIONAL'),
+        features: this.getPlanFeatures(PlanType.PROFESSIONAL),
       },
-      BUSINESS: {
+      [PlanType.BUSINESS]: {
         price: config.subscription.prices.business,
         currency: 'USD',
-        features: this.getPlanFeatures('BUSINESS'),
+        features: this.getPlanFeatures(PlanType.BUSINESS),
       },
     };
+  }
+
+  // ============================================
+  // NEW SEQUELIZE-SPECIFIC METHODS
+  // ============================================
+
+  async createOrUpdateSubscription(userId: string, data: {
+    plan?: PlanType;
+    status?: SubscriptionStatus;
+    amount?: number;
+    startDate?: Date;
+    endDate?: Date;
+    trialStartDate?: Date;
+    trialEndDate?: Date;
+    autoRenew?: boolean;
+  }) {
+    const existingSubscription = await Subscription.findOne({
+      where: { user_id: userId },
+    });
+
+    if (existingSubscription) {
+      const updateData: any = {};
+      if (data.plan) updateData.plan = data.plan;
+      if (data.status) updateData.status = data.status;
+      if (data.amount !== undefined) updateData.amount = data.amount;
+      if (data.startDate) updateData.start_date = data.startDate;
+      if (data.endDate) updateData.end_date = data.endDate;
+      if (data.trialStartDate) updateData.trial_start_date = data.trialStartDate;
+      if (data.trialEndDate) updateData.trial_end_date = data.trialEndDate;
+      if (data.autoRenew !== undefined) updateData.auto_renew = data.autoRenew;
+
+      await existingSubscription.update(updateData);
+      return existingSubscription;
+    } else {
+      return await Subscription.create({
+        user_id: userId,
+        plan: data.plan || PlanType.FREE,
+        status: data.status || SubscriptionStatus.ACTIVE,
+        amount: data.amount || 0,
+        start_date: data.startDate,
+        end_date: data.endDate,
+        trial_start_date: data.trialStartDate,
+        trial_end_date: data.trialEndDate,
+        auto_renew: data.autoRenew !== undefined ? data.autoRenew : true,
+      });
+    }
+  }
+
+  async getActiveSubscriptionsCount(plan?: PlanType) {
+    const whereClause: any = { status: SubscriptionStatus.ACTIVE };
+    if (plan) {
+      whereClause.plan = plan;
+    }
+
+    return await Subscription.count({ where: whereClause });
+  }
+
+  async getTrialSubscriptionsAboutToExpire(days = 3) {
+    const today = new Date();
+    const thresholdDate = new Date(today);
+    thresholdDate.setDate(thresholdDate.getDate() + days);
+
+    return await Subscription.findAll({
+      where: {
+        status: SubscriptionStatus.TRIAL,
+        trial_end_date: {
+          [Op.between]: [today, thresholdDate],
+        },
+      },
+      include: [{
+        association: 'user',
+        attributes: ['id', 'first_name', 'last_name', 'email'],
+      }],
+      order: [['trial_end_date', 'ASC']],
+    });
+  }
+
+  async getExpiringSubscriptions(days = 7) {
+    const today = new Date();
+    const thresholdDate = new Date(today);
+    thresholdDate.setDate(thresholdDate.getDate() + days);
+
+    return await Subscription.findAll({
+      where: {
+        status: SubscriptionStatus.ACTIVE,
+        end_date: {
+          [Op.between]: [today, thresholdDate],
+        },
+      },
+      include: [{
+        association: 'user',
+        attributes: ['id', 'first_name', 'last_name', 'email'],
+      }],
+      order: [['end_date', 'ASC']],
+    });
+  }
+
+  async getSubscriptionUsageAnalytics(userId: string) {
+    const subscription = await this.getUserSubscription(userId);
+    const features = this.getPlanFeatures(subscription.plan);
+
+    const [vehicleCount, teamMemberCount] = await Promise.all([
+      Vehicle.count({
+        where: { owner_id: userId, is_active: true },
+      }),
+      TeamMember.count({
+        where: { business_owner_id: userId, is_active: true },
+      }),
+    ]);
+
+    const loadsPostedThisMonth = subscription.loads_posted_this_month;
+    const bidsPlacedThisMonth = subscription.bids_placed_this_month;
+
+    // Calculate usage percentages
+    const vehicleUsage = features.maxVehicles === Infinity ? 0 : 
+      Math.min(100, (vehicleCount / features.maxVehicles) * 100);
+    
+    const teamUsage = features.maxTeamMembers === 0 ? 0 :
+      Math.min(100, (teamMemberCount / features.maxTeamMembers) * 100);
+
+    return {
+      subscription: {
+        plan: subscription.plan,
+        status: subscription.status,
+        startDate: subscription.start_date,
+        endDate: subscription.end_date,
+      },
+      usage: {
+        vehicles: {
+          count: vehicleCount,
+          limit: features.maxVehicles,
+          usagePercent: vehicleUsage,
+          remaining: features.maxVehicles === Infinity ? Infinity : features.maxVehicles - vehicleCount,
+        },
+        teamMembers: {
+          count: teamMemberCount,
+          limit: features.maxTeamMembers,
+          usagePercent: teamUsage,
+          remaining: features.maxTeamMembers - teamMemberCount,
+        },
+        monthly: {
+          loads: {
+            count: loadsPostedThisMonth,
+            unlimited: subscription.plan !== PlanType.FREE,
+          },
+          bids: {
+            count: bidsPlacedThisMonth,
+            unlimited: subscription.plan !== PlanType.FREE,
+          },
+        },
+      },
+      features: features,
+    };
+  }
+
+  async bulkUpdateSubscriptions(userIds: string[], updateData: {
+    plan?: PlanType;
+    status?: SubscriptionStatus;
+    amount?: number;
+    autoRenew?: boolean;
+  }) {
+    const updateClause: any = {};
+    if (updateData.plan) updateClause.plan = updateData.plan;
+    if (updateData.status) updateClause.status = updateData.status;
+    if (updateData.amount !== undefined) updateClause.amount = updateData.amount;
+    if (updateData.autoRenew !== undefined) updateClause.auto_renew = updateData.autoRenew;
+
+    const [affectedRows] = await Subscription.update(updateClause, {
+      where: { user_id: { [Op.in]: userIds } },
+    });
+
+    loggers.info('Bulk subscription update', {
+      userIds,
+      updateData,
+      affectedRows,
+    });
+
+    return { success: true, affectedRows };
+  }
+
+  async checkTrialEligibility(userId: string): Promise<{ eligible: boolean; reason?: string }> {
+    const user = await User.findByPk(userId);
+    if (!user) {
+      return { eligible: false, reason: 'User not found' };
+    }
+
+    const existingSubscription = await Subscription.findOne({
+      where: { user_id: userId },
+    });
+
+    if (existingSubscription) {
+      if (existingSubscription.has_used_trial) {
+        return { eligible: false, reason: 'User has already used their trial' };
+      }
+      if (existingSubscription.plan !== PlanType.FREE) {
+        return { eligible: false, reason: 'User already has a paid plan' };
+      }
+    }
+
+    // Check if user account is older than 30 days (prevent trial abuse)
+    const accountAge = new Date().getTime() - new Date(user.createdAt).getTime();
+    const thirtyDaysInMs = 30 * 24 * 60 * 60 * 1000;
+    if (accountAge > thirtyDaysInMs) {
+      return { eligible: false, reason: 'Account is too old for trial' };
+    }
+
+    return { eligible: true };
   }
 }
 

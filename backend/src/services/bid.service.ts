@@ -1,12 +1,22 @@
-// Bid Management Service
-// Location: backend/src/services/bid.service.ts
+// backend/src/services/bid.service.ts
 
-import prisma from '@/config/database';
-import { loggers } from '@/utils/logger';
-import { subscriptionService } from '@/services/subscription.service';
-import { notificationService } from '@/services/notification.service';
-import { BidStatus, Prisma } from '@prisma/client';
-import type { CreateBidData } from '@/types/bid.types';
+import { Op } from 'sequelize';
+import { loggers } from '../utils/logger';
+import { subscriptionService } from './subscription.service';
+import { notificationService } from './notification.service';
+import { sequelize } from '../models';
+import type { CreateBidData } from '../types/bid.types';
+import Load from '@/models/load.model';
+import Bid from '@/models/bid.model';
+import Vehicle from '@/models/vehicle.model';
+import Trip from '@/models/trip.model';
+
+export enum BidStatus {
+  PENDING = 'PENDING',
+  ACCEPTED = 'ACCEPTED',
+  REJECTED = 'REJECTED',
+  WITHDRAWN = 'WITHDRAWN',
+}
 
 class BidService {
   // ============================================
@@ -21,19 +31,12 @@ class BidService {
     }
 
     // Verify load exists and is open
-    const load = await prisma.load.findUnique({
+    const load = await Load.findOne({
       where: { id: data.loadId },
-      include: {
-        owner: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            phoneNumber: true,
-          },
-        },
-      },
+      include: [{
+        association: 'owner',
+        attributes: ['id', 'first_name', 'last_name', 'email', 'phone_number'],
+      }],
     });
 
     if (!load) {
@@ -44,15 +47,15 @@ class BidService {
       throw new Error('Load is no longer accepting bids');
     }
 
-    if (load.ownerId === driverId) {
+    if (load.owner_id === driverId) {
       throw new Error('Cannot bid on your own load');
     }
 
     // Check if driver already has a pending bid on this load
-    const existingBid = await prisma.bid.findFirst({
+    const existingBid = await Bid.findOne({
       where: {
-        loadId: data.loadId,
-        driverId,
+        load_id: data.loadId,
+        driver_id: driverId,
         status: 'PENDING',
       },
     });
@@ -63,47 +66,49 @@ class BidService {
 
     // Verify vehicle if provided
     if (data.vehicleId) {
-      const vehicle = await prisma.vehicle.findUnique({
+      const vehicle = await Vehicle.findOne({
         where: { id: data.vehicleId },
       });
 
-      if (!vehicle || vehicle.ownerId !== driverId || !vehicle.isActive) {
+      if (!vehicle || vehicle.owner_id !== driverId || !vehicle.is_active) {
         throw new Error('Invalid vehicle');
       }
 
       // Check if vehicle type matches load requirements
-      if (!load.vehicleTypes.includes(vehicle.type)) {
+      if (!load.vehicle_types.includes(vehicle.type)) {
         throw new Error('Vehicle type does not match load requirements');
       }
     }
 
     // Create bid
-    const bid = await prisma.bid.create({
-      data: {
-        loadId: data.loadId,
-        driverId,
-        proposedPrice: data.proposedPrice,
-        currency: data.currency || 'USD',
-        message: data.message,
-        estimatedDuration: data.estimatedDuration,
-        vehicleId: data.vehicleId,
-        expiresAt: data.expiresAt,
-        status: 'PENDING',
-      },
-      include: {
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            rating: true,
-            totalRatings: true,
-            phoneVerified: true,
-          },
+    const bid = await Bid.create({
+      load_id: data.loadId,
+      driver_id: driverId,
+      proposed_price: data.proposedPrice,
+      currency: data.currency || 'USD',
+      message: data.message,
+      estimated_duration: data.estimatedDuration,
+      vehicle_id: data.vehicleId,
+      expires_at: data.expiresAt,
+      status: 'PENDING',
+    } as any);
+
+    // Fetch bid with relationships
+    const bidWithRelations = await Bid.findByPk(bid.id, {
+      include: [
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'rating', 'total_ratings', 'phone_verified'],
         },
-        vehicle: true,
-      },
+        {
+          association: 'vehicle',
+        },
+      ],
     });
+
+    if (!bidWithRelations) {
+      throw new Error('Failed to create bid');
+    }
 
     // Record bid placed
     await subscriptionService.recordBidPlaced(driverId);
@@ -112,26 +117,28 @@ class BidService {
 
     // Notify load owner
     await notificationService.notifyNewBid(
-      load.ownerId,
+      load.owner_id,
       load.title,
       data.proposedPrice,
-      `${bid.driver.firstName} ${bid.driver.lastName}`
+      `${bidWithRelations.driver.first_name} ${bidWithRelations.driver.last_name}`
     );
 
-    return bid;
+    return bidWithRelations;
   }
 
   async updateBid(bidId: string, driverId: string, data: Partial<CreateBidData>) {
-    const existingBid = await prisma.bid.findUnique({
+    const existingBid = await Bid.findOne({
       where: { id: bidId },
-      include: { load: true },
+      include: [{
+        association: 'load',
+      }],
     });
 
     if (!existingBid) {
       throw new Error('Bid not found');
     }
 
-    if (existingBid.driverId !== driverId) {
+    if (existingBid.driver_id !== driverId) {
       throw new Error('Unauthorized to update this bid');
     }
 
@@ -143,42 +150,44 @@ class BidService {
       throw new Error('Load is no longer accepting bid updates');
     }
 
-    const bid = await prisma.bid.update({
-      where: { id: bidId },
-      data: {
-        ...(data.proposedPrice && { proposedPrice: data.proposedPrice }),
-        ...(data.message && { message: data.message }),
-        ...(data.estimatedDuration && { estimatedDuration: data.estimatedDuration }),
-        ...(data.vehicleId && { vehicleId: data.vehicleId }),
-        ...(data.expiresAt && { expiresAt: data.expiresAt }),
-      },
-      include: {
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            rating: true,
-          },
+    const updateData: any = {};
+    if (data.proposedPrice !== undefined) updateData.proposed_price = data.proposedPrice;
+    if (data.message !== undefined) updateData.message = data.message;
+    if (data.estimatedDuration !== undefined) updateData.estimated_duration = data.estimatedDuration;
+    if (data.vehicleId !== undefined) updateData.vehicle_id = data.vehicleId;
+    if (data.expiresAt !== undefined) updateData.expires_at = data.expiresAt;
+
+    await existingBid.update(updateData);
+
+    // Fetch updated bid with relationships
+    const updatedBid = await Bid.findByPk(bidId, {
+      include: [
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'rating'],
         },
-        vehicle: true,
-      },
+        {
+          association: 'vehicle',
+        },
+      ],
     });
 
+    if (!updatedBid) {
+      throw new Error('Bid not found after update');
+    }
+
     loggers.info('Bid updated', { bidId, driverId });
-    return bid;
+    return updatedBid;
   }
 
   async withdrawBid(bidId: string, driverId: string) {
-    const bid = await prisma.bid.findUnique({
-      where: { id: bidId },
-    });
+    const bid = await Bid.findByPk(bidId);
 
     if (!bid) {
       throw new Error('Bid not found');
     }
 
-    if (bid.driverId !== driverId) {
+    if (bid.driver_id !== driverId) {
       throw new Error('Unauthorized');
     }
 
@@ -186,13 +195,9 @@ class BidService {
       throw new Error('Cannot withdraw bid in current status');
     }
 
-    const withdrawnBid = await prisma.bid.update({
-      where: { id: bidId },
-      data: { status: 'WITHDRAWN' },
-    });
-
+    await bid.update({ status: 'WITHDRAWN' });
     loggers.info('Bid withdrawn', { bidId, driverId });
-    return withdrawnBid;
+    return bid;
   }
 
   // ============================================
@@ -200,31 +205,27 @@ class BidService {
   // ============================================
 
   async acceptBid(bidId: string, loadOwnerId: string) {
-    const bid = await prisma.bid.findUnique({
+    const bid = await Bid.findOne({
       where: { id: bidId },
-      include: {
-        load: {
-          include: {
-            owner: true,
-          },
+      include: [
+        {
+          association: 'load',
+          include: [{
+            association: 'owner',
+          }],
         },
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            phoneNumber: true,
-            email: true,
-          },
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'phone_number', 'email'],
         },
-      },
+      ],
     });
 
     if (!bid) {
       throw new Error('Bid not found');
     }
 
-    if (bid.load.ownerId !== loadOwnerId) {
+    if (bid.load.owner_id !== loadOwnerId) {
       throw new Error('Unauthorized');
     }
 
@@ -237,65 +238,71 @@ class BidService {
     }
 
     // Use transaction to ensure consistency
-    const result = await prisma.$transaction(async (tx) => {
+    const transaction = await sequelize.transaction();
+
+    try {
       // Accept the bid
-      const acceptedBid = await tx.bid.update({
-        where: { id: bidId },
-        data: { status: 'ACCEPTED' },
-      });
+      await bid.update({ status: 'ACCEPTED' }, { transaction });
 
       // Reject all other pending bids on this load
-      await tx.bid.updateMany({
-        where: {
-          loadId: bid.loadId,
-          id: { not: bidId },
-          status: 'PENDING',
-        },
-        data: { status: 'REJECTED' },
-      });
+      await Bid.update(
+        { status: 'REJECTED' },
+        {
+          where: {
+            load_id: bid.load_id,
+            id: { [Op.ne]: bidId },
+            status: 'PENDING',
+          },
+          transaction,
+        }
+      );
 
       // Update load status to ASSIGNED
-      await tx.load.update({
-        where: { id: bid.loadId },
-        data: { status: 'ASSIGNED' },
-      });
+      await Load.update(
+        { status: 'ASSIGNED' },
+        {
+          where: { id: bid.load_id },
+          transaction,
+        }
+      );
 
       // Create trip
-      const trip = await tx.trip.create({
-        data: {
-          loadId: bid.loadId,
-          bidId: bid.id,
-          driverId: bid.driverId,
-          agreedPrice: bid.proposedPrice,
-          currency: bid.currency,
-          status: 'SCHEDULED',
-        },
-      });
+      const trip = await Trip.create({
+        load_id: bid.load_id,
+        bid_id: bid.id,
+        driver_id: bid.driver_id,
+        agreed_price: bid.proposed_price,
+        currency: bid.currency,
+        status: 'SCHEDULED',
+      } as any, { transaction });
 
-      return { acceptedBid, trip };
-    });
+      await transaction.commit();
 
-    loggers.bid.accepted(bidId, bid.loadId, bid.driverId);
+      loggers.bid.accepted(bidId, bid.load_id, bid.driver_id);
 
-    // Notify driver
-    await notificationService.notifyBidAccepted(bid.driverId, bid.load.title);
+      // Notify driver
+      await notificationService.notifyBidAccepted(bid.driver_id, bid.load.title);
 
-    return result;
+      return { acceptedBid: bid, trip };
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   }
 
   async rejectBid(bidId: string, loadOwnerId: string, reason?: string) {
-    const bid = await prisma.bid.findUnique({
+    const bid = await Bid.findOne({
       where: { id: bidId },
-      include: {
-        load: true,
-      },
+      include: [{
+        association: 'load',
+      }],
     });
 
     if (!bid) {
       throw new Error('Bid not found');
     }
 
-    if (bid.load.ownerId !== loadOwnerId) {
+    if (bid.load.owner_id !== loadOwnerId) {
       throw new Error('Unauthorized');
     }
 
@@ -303,13 +310,9 @@ class BidService {
       throw new Error('Bid is not pending');
     }
 
-    const rejectedBid = await prisma.bid.update({
-      where: { id: bidId },
-      data: { status: 'REJECTED' },
-    });
-
-    loggers.bid.rejected(bidId, bid.loadId, reason);
-    return rejectedBid;
+    await bid.update({ status: 'REJECTED' });
+    loggers.bid.rejected(bidId, bid.load_id, reason);
+    return bid;
   }
 
   // ============================================
@@ -317,37 +320,26 @@ class BidService {
   // ============================================
 
   async getBid(bidId: string) {
-    const bid = await prisma.bid.findUnique({
-      where: { id: bidId },
-      include: {
-        load: {
-          include: {
-            owner: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                companyName: true,
-                rating: true,
-              },
-            },
-          },
+    const bid = await Bid.findByPk(bidId, {
+      include: [
+        {
+          association: 'load',
+          include: [{
+            association: 'owner',
+            attributes: ['id', 'first_name', 'last_name', 'company_name', 'rating'],
+          }],
         },
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            companyName: true,
-            rating: true,
-            totalRatings: true,
-            phoneVerified: true,
-            emailVerified: true,
-          },
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'company_name', 'rating', 'total_ratings', 'phone_verified', 'email_verified'],
         },
-        vehicle: true,
-        trip: true,
-      },
+        {
+          association: 'vehicle',
+        },
+        {
+          association: 'trip',
+        },
+      ],
     });
 
     if (!bid) {
@@ -359,102 +351,85 @@ class BidService {
 
   async getLoadBids(loadId: string, loadOwnerId?: string) {
     // Verify load exists
-    const load = await prisma.load.findUnique({
-      where: { id: loadId },
-    });
+    const load = await Load.findByPk(loadId);
 
     if (!load) {
       throw new Error('Load not found');
     }
 
     // Only load owner can see all bids
-    if (loadOwnerId && load.ownerId !== loadOwnerId) {
+    if (loadOwnerId && load.owner_id !== loadOwnerId) {
       throw new Error('Unauthorized to view bids');
     }
 
-    return await prisma.bid.findMany({
+    return await Bid.findAll({
       where: {
-        loadId,
+        load_id: loadId,
         status: 'PENDING',
       },
-      include: {
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            rating: true,
-            totalRatings: true,
-            phoneVerified: true,
-          },
+      include: [
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'rating', 'total_ratings', 'phone_verified'],
         },
-        vehicle: true,
-      },
-      orderBy: [
-        { proposedPrice: 'asc' },
-        { createdAt: 'asc' },
+        {
+          association: 'vehicle',
+        },
+      ],
+      order: [
+        ['proposed_price', 'ASC'],
+        ['created_at', 'ASC'],
       ],
     });
   }
 
   async getUserBids(driverId: string, status?: BidStatus) {
-    return await prisma.bid.findMany({
-      where: {
-        driverId,
-        ...(status && { status }),
-      },
-      include: {
-        load: {
-          include: {
-            owner: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                companyName: true,
-                rating: true,
-              },
-            },
-          },
+    const whereClause: any = { driver_id: driverId };
+    if (status) {
+      whereClause.status = status;
+    }
+
+    return await Bid.findAll({
+      where: whereClause,
+      include: [
+        {
+          association: 'load',
+          include: [{
+            association: 'owner',
+            attributes: ['id', 'first_name', 'last_name', 'company_name', 'rating'],
+          }],
         },
-        vehicle: true,
-        trip: true,
-      },
-      orderBy: { createdAt: 'desc' },
+        {
+          association: 'vehicle',
+        },
+        {
+          association: 'trip',
+        },
+      ],
+      order: [['created_at', 'DESC']],
     });
   }
 
   async getUserReceivedBids(ownerId: string) {
-    return await prisma.bid.findMany({
+    return await Bid.findAll({
       where: {
-        load: {
-          ownerId,
-        },
+        '$load.owner_id$': ownerId,
         status: 'PENDING',
       },
-      include: {
-        load: {
-          select: {
-            id: true,
-            title: true,
-            pickupLocation: true,
-            deliveryLocation: true,
-            pickupDate: true,
-          },
+      include: [
+        {
+          association: 'load',
+          attributes: ['id', 'title', 'pickup_location', 'delivery_location', 'pickup_date'],
         },
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            rating: true,
-            totalRatings: true,
-            phoneVerified: true,
-          },
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'rating', 'total_ratings', 'phone_verified'],
         },
-        vehicle: true,
-      },
-      orderBy: { createdAt: 'desc' },
+        {
+          association: 'vehicle',
+        },
+      ],
+      order: [['created_at', 'DESC']],
     });
   }
 
@@ -463,21 +438,33 @@ class BidService {
   // ============================================
 
   async getBidStats(driverId: string) {
-    const [total, pending, accepted, rejected, withdrawn] = await Promise.all([
-      prisma.bid.count({ where: { driverId } }),
-      prisma.bid.count({ where: { driverId, status: 'PENDING' } }),
-      prisma.bid.count({ where: { driverId, status: 'ACCEPTED' } }),
-      prisma.bid.count({ where: { driverId, status: 'REJECTED' } }),
-      prisma.bid.count({ where: { driverId, status: 'WITHDRAWN' } }),
+    const [
+      total,
+      pending,
+      accepted,
+      rejected,
+      withdrawn
+    ] = await Promise.all([
+      Bid.count({ where: { driver_id: driverId } }),
+      Bid.count({ where: { driver_id: driverId, status: 'PENDING' } }),
+      Bid.count({ where: { driver_id: driverId, status: 'ACCEPTED' } }),
+      Bid.count({ where: { driver_id: driverId, status: 'REJECTED' } }),
+      Bid.count({ where: { driver_id: driverId, status: 'WITHDRAWN' } }),
     ]);
 
     const acceptanceRate = total > 0 ? (accepted / total) * 100 : 0;
 
     // Get average bid amount
-    const avgBid = await prisma.bid.aggregate({
-      where: { driverId, status: { in: ['PENDING', 'ACCEPTED'] } },
-      _avg: { proposedPrice: true },
-    });
+    const avgBid = await Bid.findOne({
+      attributes: [
+        [sequelize.fn('AVG', sequelize.col('proposed_price')), 'average'],
+      ],
+      where: { 
+        driver_id: driverId, 
+        status: { [Op.in]: ['PENDING', 'ACCEPTED'] } 
+      },
+      raw: true,
+    }) as { average: number | null } | null;
 
     return {
       total,
@@ -486,34 +473,39 @@ class BidService {
       rejected,
       withdrawn,
       acceptanceRate: Math.round(acceptanceRate),
-      averageBidAmount: avgBid._avg.proposedPrice || 0,
+      averageBidAmount: avgBid?.average || 0,
     };
   }
 
   async getLoadBidStats(loadId: string) {
-    const [total, lowest, highest, average] = await Promise.all([
-      prisma.bid.count({ where: { loadId, status: 'PENDING' } }),
-      prisma.bid.findFirst({
-        where: { loadId, status: 'PENDING' },
-        orderBy: { proposedPrice: 'asc' },
-        select: { proposedPrice: true },
-      }),
-      prisma.bid.findFirst({
-        where: { loadId, status: 'PENDING' },
-        orderBy: { proposedPrice: 'desc' },
-        select: { proposedPrice: true },
-      }),
-      prisma.bid.aggregate({
-        where: { loadId, status: 'PENDING' },
-        _avg: { proposedPrice: true },
+    const [total, bids] = await Promise.all([
+      Bid.count({ where: { load_id: loadId, status: 'PENDING' } }),
+      Bid.findAll({
+        where: { load_id: loadId, status: 'PENDING' },
+        attributes: ['proposed_price'],
+        raw: true,
       }),
     ]);
 
+    if (total === 0) {
+      return {
+        totalBids: 0,
+        lowestBid: 0,
+        highestBid: 0,
+        averageBid: 0,
+      };
+    }
+
+    const prices = bids.map(bid => bid.proposed_price);
+    const lowestBid = Math.min(...prices);
+    const highestBid = Math.max(...prices);
+    const averageBid = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+
     return {
       totalBids: total,
-      lowestBid: lowest?.proposedPrice || 0,
-      highestBid: highest?.proposedPrice || 0,
-      averageBid: average._avg.proposedPrice || 0,
+      lowestBid,
+      highestBid,
+      averageBid,
     };
   }
 
@@ -522,41 +514,37 @@ class BidService {
   // ============================================
 
   async expireBids() {
-    const expiredBids = await prisma.bid.updateMany({
-      where: {
-        status: 'PENDING',
-        expiresAt: {
-          lte: new Date(),
+    const expiredBids = await Bid.update(
+      { status: 'REJECTED' },
+      {
+        where: {
+          status: 'PENDING',
+          expires_at: {
+            [Op.lte]: new Date(),
+          },
         },
-      },
-      data: { status: 'REJECTED' },
-    });
+      }
+    );
 
-    if (expiredBids.count > 0) {
-      loggers.info(`Expired ${expiredBids.count} bids`);
+    if (expiredBids[0] > 0) {
+      loggers.info(`Expired ${expiredBids[0]} bids`);
     }
 
-    return expiredBids;
+    return expiredBids[0];
   }
 
   async getBidHistory(driverId: string, limit = 10) {
-    return await prisma.bid.findMany({
+    return await Bid.findAll({
       where: {
-        driverId,
-        status: { in: ['ACCEPTED', 'REJECTED'] },
+        driver_id: driverId,
+        status: { [Op.in]: ['ACCEPTED', 'REJECTED'] },
       },
-      include: {
-        load: {
-          select: {
-            id: true,
-            title: true,
-            pickupLocation: true,
-            deliveryLocation: true,
-          },
-        },
-      },
-      orderBy: { updatedAt: 'desc' },
-      take: limit,
+      include: [{
+        association: 'load',
+        attributes: ['id', 'title', 'pickup_location', 'delivery_location'],
+      }],
+      order: [['updated_at', 'DESC']],
+      limit,
     });
   }
 
@@ -568,9 +556,7 @@ class BidService {
     }
 
     // Check if load exists and is open
-    const load = await prisma.load.findUnique({
-      where: { id: loadId },
-    });
+    const load = await Load.findByPk(loadId);
 
     if (!load) {
       return { allowed: false, reason: 'Load not found' };
@@ -580,15 +566,15 @@ class BidService {
       return { allowed: false, reason: 'Load is not accepting bids' };
     }
 
-    if (load.ownerId === driverId) {
+    if (load.owner_id === driverId) {
       return { allowed: false, reason: 'Cannot bid on your own load' };
     }
 
     // Check existing bid
-    const existingBid = await prisma.bid.findFirst({
+    const existingBid = await Bid.findOne({
       where: {
-        loadId,
-        driverId,
+        load_id: loadId,
+        driver_id: driverId,
         status: 'PENDING',
       },
     });
@@ -598,6 +584,39 @@ class BidService {
     }
 
     return { allowed: true };
+  }
+
+  // ============================================
+  // NEW METHODS FOR SEQUELIZE
+  // ============================================
+
+  async getActiveBidCount(driverId: string): Promise<number> {
+    return Bid.count({
+      where: {
+        driver_id: driverId,
+        status: 'PENDING',
+      },
+    });
+  }
+
+  async getBidWithDriver(bidId: string) {
+    return Bid.findByPk(bidId, {
+      include: [{
+        association: 'driver',
+        attributes: ['id', 'first_name', 'last_name', 'phone_number', 'email', 'rating'],
+      }],
+    });
+  }
+
+  async updateBidStatus(bidId: string, status: BidStatus) {
+    const bid = await Bid.findByPk(bidId);
+    
+    if (!bid) {
+      throw new Error('Bid not found');
+    }
+
+    await bid.update({ status });
+    return bid;
   }
 }
 

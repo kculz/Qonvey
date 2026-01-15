@@ -7,6 +7,7 @@ import jwt from 'jsonwebtoken';
 import { config } from '@/config/env';
 import { loggers } from '@/utils/logger';
 import prisma from '@/config/database';
+import User from '@/models/user.model';
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
@@ -51,7 +52,7 @@ class SocketService {
         const decoded = jwt.verify(token, config.jwt.secret) as any;
 
         // Verify user exists
-        const user = await prisma.user.findUnique({
+        const user = await User.findOne({
           where: { id: decoded.userId },
         });
 

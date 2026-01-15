@@ -1,10 +1,13 @@
-// Messaging Service
-// Location: backend/src/services/message.service.ts
+// backend/src/services/message.service.ts
 
-import prisma from '@/config/database';
-import { loggers } from '@/utils/logger';
-import { notificationService } from '@/services/notification.service';
-import type { SendMessageData } from '@/types/message.types';
+import { Op } from 'sequelize';
+import { loggers } from '../utils/logger';
+import { notificationService } from './notification.service';
+import type { SendMessageData, Conversation } from '../types/message.types';
+import User from '@/models/user.model';
+import Message from '@/models/message.model';
+import Load from '@/models/load.model';
+import Bid from '@/models/bid.model';
 
 class MessageService {
   // ============================================
@@ -14,8 +17,8 @@ class MessageService {
   async sendMessage(senderId: string, data: SendMessageData) {
     // Verify users exist
     const [sender, receiver] = await Promise.all([
-      prisma.user.findUnique({ where: { id: senderId } }),
-      prisma.user.findUnique({ where: { id: data.receiverId } }),
+      User.findByPk(senderId),
+      User.findByPk(data.receiverId),
     ]);
 
     if (!sender || !receiver) {
@@ -23,39 +26,37 @@ class MessageService {
     }
 
     // Create message
-    const message = await prisma.message.create({
-      data: {
-        senderId,
-        receiverId: data.receiverId,
-        content: data.content,
-        loadId: data.loadId,
-        bidId: data.bidId,
-      },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+    const message = await Message.create({
+      sender_id: senderId,
+      receiver_id: data.receiverId,
+      content: data.content,
+      load_id: data.loadId,
+      bid_id: data.bidId,
+    } as any);
+
+    // Fetch message with relationships
+    const messageWithRelations = await Message.findByPk(message.id, {
+      include: [
+        {
+          association: 'sender',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        receiver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-      },
+      ],
     });
+
+    if (!messageWithRelations) {
+      throw new Error('Failed to create message');
+    }
 
     loggers.info('Message sent', { messageId: message.id, senderId, receiverId: data.receiverId });
 
     // Send push notification to receiver
     await notificationService.sendPushNotification(data.receiverId, {
-      title: `Message from ${sender.firstName} ${sender.lastName}`,
+      title: `Message from ${sender.first_name} ${sender.last_name}`,
       body: data.content.substring(0, 100),
       type: 'NEW_MESSAGE',
       data: { 
@@ -66,93 +67,79 @@ class MessageService {
       },
     });
 
-    return message;
+    return messageWithRelations;
   }
 
   async getConversation(userId: string, otherUserId: string, page = 1, limit = 50) {
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    const [messages, total] = await Promise.all([
-      prisma.message.findMany({
-        where: {
-          OR: [
-            { senderId: userId, receiverId: otherUserId },
-            { senderId: otherUserId, receiverId: userId },
-          ],
+    const { count, rows: messages } = await Message.findAndCountAll({
+      where: {
+        [Op.or]: [
+          { sender_id: userId, receiver_id: otherUserId },
+          { sender_id: otherUserId, receiver_id: userId },
+        ],
+      },
+      include: [
+        {
+          association: 'sender',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        include: {
-          sender: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              profileImage: true,
-            },
-          },
-          receiver: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              profileImage: true,
-            },
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      prisma.message.count({
-        where: {
-          OR: [
-            { senderId: userId, receiverId: otherUserId },
-            { senderId: otherUserId, receiverId: userId },
-          ],
-        },
-      }),
-    ]);
+      ],
+      order: [['created_at', 'DESC']],
+      offset,
+      limit,
+    });
 
     // Mark messages as read
-    await prisma.message.updateMany({
-      where: {
-        senderId: otherUserId,
-        receiverId: userId,
-        read: false,
-      },
-      data: {
+    await Message.update(
+      {
         read: true,
-        readAt: new Date(),
+        read_at: new Date(),
       },
-    });
+      {
+        where: {
+          sender_id: otherUserId,
+          receiver_id: userId,
+          read: false,
+        },
+      }
+    );
 
     return {
       messages: messages.reverse(),
       pagination: {
-        total,
+        total: count,
         page,
         limit,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(count / limit),
       },
     };
   }
 
-  async getConversations(userId: string) {
+  async getConversations(userId: string): Promise<Conversation[]> {
     // Get all unique conversation partners
-    const sentMessages = await prisma.message.findMany({
-      where: { senderId: userId },
-      distinct: ['receiverId'],
-      select: { receiverId: true },
+    const sentMessages = await Message.findAll({
+      attributes: ['receiver_id'],
+      where: { sender_id: userId },
+      group: ['receiver_id'],
+      raw: true,
     });
 
-    const receivedMessages = await prisma.message.findMany({
-      where: { receiverId: userId },
-      distinct: ['senderId'],
-      select: { senderId: true },
+    const receivedMessages = await Message.findAll({
+      attributes: ['sender_id'],
+      where: { receiver_id: userId },
+      group: ['sender_id'],
+      raw: true,
     });
 
     const userIds = [
-      ...sentMessages.map((m) => m.receiverId),
-      ...receivedMessages.map((m) => m.senderId),
+      ...sentMessages.map((m) => m.receiver_id),
+      ...receivedMessages.map((m) => m.sender_id),
     ];
 
     const uniqueUserIds = [...new Set(userIds)];
@@ -160,43 +147,35 @@ class MessageService {
     // Get last message and unread count for each conversation
     const conversations = await Promise.all(
       uniqueUserIds.map(async (otherUserId) => {
-        const lastMessage = await prisma.message.findFirst({
+        // Get last message
+        const lastMessage = await Message.findOne({
           where: {
-            OR: [
-              { senderId: userId, receiverId: otherUserId },
-              { senderId: otherUserId, receiverId: userId },
+            [Op.or]: [
+              { sender_id: userId, receiver_id: otherUserId },
+              { sender_id: otherUserId, receiver_id: userId },
             ],
           },
-          orderBy: { createdAt: 'desc' },
-          include: {
-            sender: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                profileImage: true,
-              },
+          include: [
+            {
+              association: 'sender',
+              attributes: ['id', 'first_name', 'last_name', 'profile_image'],
             },
-          },
+          ],
+          order: [['created_at', 'DESC']],
         });
 
-        const unreadCount = await prisma.message.count({
+        // Get unread count
+        const unreadCount = await Message.count({
           where: {
-            senderId: otherUserId,
-            receiverId: userId,
+            sender_id: otherUserId,
+            receiver_id: userId,
             read: false,
           },
         });
 
-        const otherUser = await prisma.user.findUnique({
-          where: { id: otherUserId },
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-            status: true,
-          },
+        // Get other user info
+        const otherUser = await User.findByPk(otherUserId, {
+          attributes: ['id', 'first_name', 'last_name', 'profile_image', 'status'],
         });
 
         return {
@@ -218,44 +197,36 @@ class MessageService {
   }
 
   async markAsRead(messageId: string, userId: string) {
-    const message = await prisma.message.findUnique({
-      where: { id: messageId },
-    });
+    const message = await Message.findByPk(messageId);
 
     if (!message) {
       throw new Error('Message not found');
     }
 
-    if (message.receiverId !== userId) {
+    if (message.receiver_id !== userId) {
       throw new Error('Unauthorized');
     }
 
-    return await prisma.message.update({
-      where: { id: messageId },
-      data: {
-        read: true,
-        readAt: new Date(),
-      },
+    await message.update({
+      read: true,
+      read_at: new Date(),
     });
+
+    return message;
   }
 
   async deleteMessage(messageId: string, userId: string) {
-    const message = await prisma.message.findUnique({
-      where: { id: messageId },
-    });
+    const message = await Message.findByPk(messageId);
 
     if (!message) {
       throw new Error('Message not found');
     }
 
-    if (message.senderId !== userId) {
+    if (message.sender_id !== userId) {
       throw new Error('Unauthorized - only sender can delete message');
     }
 
-    await prisma.message.delete({
-      where: { id: messageId },
-    });
-
+    await message.destroy();
     return { success: true };
   }
 
@@ -265,78 +236,61 @@ class MessageService {
 
   async getLoadMessages(loadId: string, userId: string) {
     // Verify user is load owner
-    const load = await prisma.load.findUnique({
-      where: { id: loadId },
-    });
+    const load = await Load.findByPk(loadId);
 
     if (!load) {
       throw new Error('Load not found');
     }
 
-    if (load.ownerId !== userId) {
+    if (load.owner_id !== userId) {
       throw new Error('Unauthorized');
     }
 
-    return await prisma.message.findMany({
-      where: { loadId },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+    return await Message.findAll({
+      where: { load_id: loadId },
+      include: [
+        {
+          association: 'sender',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        receiver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-      },
-      orderBy: { createdAt: 'desc' },
+      ],
+      order: [['created_at', 'DESC']],
     });
   }
 
   async getBidMessages(bidId: string, userId: string) {
     // Verify user is involved in bid
-    const bid = await prisma.bid.findUnique({
-      where: { id: bidId },
-      include: { load: true },
+    const bid = await Bid.findByPk(bidId, {
+      include: [{
+        association: 'load',
+      }],
     });
 
     if (!bid) {
       throw new Error('Bid not found');
     }
 
-    if (bid.driverId !== userId && bid.load.ownerId !== userId) {
+    if (bid.driver_id !== userId && bid.load.owner_id !== userId) {
       throw new Error('Unauthorized');
     }
 
-    return await prisma.message.findMany({
-      where: { bidId },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+    return await Message.findAll({
+      where: { bid_id: bidId },
+      include: [
+        {
+          association: 'sender',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-        receiver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            profileImage: true,
-          },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
         },
-      },
-      orderBy: { createdAt: 'desc' },
+      ],
+      order: [['created_at', 'DESC']],
     });
   }
 
@@ -344,10 +298,10 @@ class MessageService {
   // ANALYTICS
   // ============================================
 
-  async getUnreadCount(userId: string) {
-    return await prisma.message.count({
+  async getUnreadCount(userId: string): Promise<number> {
+    return await Message.count({
       where: {
-        receiverId: userId,
+        receiver_id: userId,
         read: false,
       },
     });
@@ -355,9 +309,9 @@ class MessageService {
 
   async getMessageStats(userId: string) {
     const [sent, received, unread] = await Promise.all([
-      prisma.message.count({ where: { senderId: userId } }),
-      prisma.message.count({ where: { receiverId: userId } }),
-      prisma.message.count({ where: { receiverId: userId, read: false } }),
+      Message.count({ where: { sender_id: userId } }),
+      Message.count({ where: { receiver_id: userId } }),
+      Message.count({ where: { receiver_id: userId, read: false } }),
     ]);
 
     return {
@@ -366,6 +320,136 @@ class MessageService {
       unread,
       total: sent + received,
     };
+  }
+
+  // ============================================
+  // NEW METHODS FOR SEQUELIZE
+  // ============================================
+
+  async markAllAsRead(userId: string, otherUserId?: string) {
+    const whereClause: any = {
+      receiver_id: userId,
+      read: false,
+    };
+
+    if (otherUserId) {
+      whereClause.sender_id = otherUserId;
+    }
+
+    const result = await Message.update(
+      {
+        read: true,
+        read_at: new Date(),
+      },
+      {
+        where: whereClause,
+      }
+    );
+
+    return { updated: result[0] };
+  }
+
+  async getRecentConversations(userId: string, limit = 10) {
+    // Get the most recent conversations
+    const messages = await Message.findAll({
+      where: {
+        [Op.or]: [
+          { sender_id: userId },
+          { receiver_id: userId },
+        ],
+      },
+      include: [
+        {
+          association: 'sender',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
+        },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
+        },
+      ],
+      order: [['created_at', 'DESC']],
+      limit,
+    });
+
+    // Group by conversation partner
+    const conversationMap = new Map();
+    
+    for (const message of messages) {
+      const otherUserId = message.sender_id === userId ? message.receiver_id : message.sender_id;
+      
+      if (!conversationMap.has(otherUserId)) {
+        const otherUser = message.sender_id === userId ? message.receiver : message.sender;
+        conversationMap.set(otherUserId, {
+          user: otherUser,
+          lastMessage: message,
+        });
+      }
+    }
+
+    return Array.from(conversationMap.values());
+  }
+
+  async searchMessages(userId: string, query: string, limit = 50) {
+    return await Message.findAll({
+      where: {
+        [Op.or]: [
+          { sender_id: userId },
+          { receiver_id: userId },
+        ],
+        content: { [Op.iLike]: `%${query}%` },
+      },
+      include: [
+        {
+          association: 'sender',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
+        },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
+        },
+      ],
+      order: [['created_at', 'DESC']],
+      limit,
+    });
+  }
+
+  async getMessageById(messageId: string, userId: string) {
+    const message = await Message.findByPk(messageId, {
+      include: [
+        {
+          association: 'sender',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
+        },
+        {
+          association: 'receiver',
+          attributes: ['id', 'first_name', 'last_name', 'profile_image'],
+        },
+        {
+          association: 'load',
+          attributes: ['id', 'title'],
+        },
+        {
+          association: 'bid',
+          attributes: ['id', 'proposed_price'],
+        },
+      ],
+    });
+
+    if (!message) {
+      throw new Error('Message not found');
+    }
+
+    if (message.sender_id !== userId && message.receiver_id !== userId) {
+      throw new Error('Unauthorized');
+    }
+
+    // Mark as read if receiver
+    if (message.receiver_id === userId && !message.read) {
+      await message.markAsRead();
+    }
+
+    return message;
   }
 }
 

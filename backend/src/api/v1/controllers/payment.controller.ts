@@ -4,7 +4,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '@/middleware/auth.middleware';
 import { paymentService } from '@/services/payment.service';
-import { PlanType, PaymentMethod } from '@prisma/client';
+import { PaymentMethod, PlanType } from '@/models/subscription-invoice.model';
 
 export const initiatePayment = async (req: AuthRequest, res: Response) => {
   try {

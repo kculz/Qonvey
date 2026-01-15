@@ -1,4 +1,4 @@
-import { UserRole } from '@prisma/client';
+import { UserRole } from "@/models/user.model";
 
 export interface RegisterData {
   phoneNumber: string;

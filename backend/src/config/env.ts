@@ -1,6 +1,7 @@
 // Enhanced Environment Configuration
 // Location: backend/src/config/env.ts
 
+import { subscribe } from 'diagnostics_channel';
 import dotenv from 'dotenv';
 import { z } from 'zod';
 
@@ -15,7 +16,12 @@ const envSchema = z.object({
   API_PREFIX: z.string().default('/api'),
 
   // Database
-  DATABASE_URL: z.string().min(1, 'Database URL is required'),
+  DATABASE_URL: z.string().min(1, 'Database URL is required').default('postgresql://postgres:dontknow@localhost:5432/qonvey?schema=public'),
+  DB_HOST: z.string().default('localhost'),
+  DB_PORT: z.string().transform(Number).default('5432'),
+  DB_USER: z.string().min(1, 'Database user is required').default('postgres'),
+  DB_PASSWORD: z.string().min(1, 'Database password is required').default('dontknow'),
+  DB_NAME: z.string().min(1, 'Database name is required').default('qonvey'),  
 
   // Redis
   REDIS_URL: z.string().optional(),
@@ -42,6 +48,7 @@ const envSchema = z.object({
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
   TWILIO_PHONE_NUMBER: z.string().optional(),
+  TWILIO_ENABLED: z.string().transform(val => val === 'true').default('true'),
 
   // SMS - Africa's Talking (Alternative)
   AFRICASTALKING_API_KEY: z.string().optional(),
@@ -95,6 +102,13 @@ const envSchema = z.object({
   ENABLE_PAYMENT_GATEWAY: z.string().transform(val => val === 'true').default('true'),
   ENABLE_SMS_NOTIFICATIONS: z.string().transform(val => val === 'true').default('true'),
   ENABLE_EMAIL_NOTIFICATIONS: z.string().transform(val => val === 'true').default('true'),
+
+  // Bank Details
+  BANK_NAME: z.string().optional(),
+  BANK_ACCOUNT_NUMBER: z.string().optional(),
+  BANK_ACCOUNT_NAME: z.string().optional(),
+  BANK_BRANCH_CODE: z.string().optional(),
+  BANK_SWIFT_CODE: z.string().optional(),
 
   // Client URLs
   CLIENT_URL: z.string().url().default('http://localhost:3000'),
@@ -172,6 +186,11 @@ export const config = {
       resultUrl: env.PAYNOW_RESULT_URL || '',
       enabled: !!env.PAYNOW_INTEGRATION_ID && !!env.PAYNOW_INTEGRATION_KEY,
     },
+    subscriptionPrices: {
+      STARTER: env.SUBSCRIPTION_STARTER_PRICE,
+      PROFESSIONAL: env.SUBSCRIPTION_PROFESSIONAL_PRICE,
+      BUSINESS: env.SUBSCRIPTION_BUSINESS_PRICE,
+    },
   },
 
   // SMS
@@ -226,6 +245,15 @@ export const config = {
     },
   },
 
+  // Bank Details
+  bank: {
+    name: env.BANK_NAME || '',
+    accountNumber: env.BANK_ACCOUNT_NUMBER || '',
+    accountName: env.BANK_ACCOUNT_NAME || '',
+    branchCode: env.BANK_BRANCH_CODE || '',
+    swiftCode: env.BANK_SWIFT_CODE || '',
+  },
+
   // Maps
   maps: {
     googleApiKey: env.GOOGLE_MAPS_API_KEY || '',
@@ -275,6 +303,22 @@ export const config = {
     mobileDeepLink: env.MOBILE_DEEP_LINK,
     // appStoreUrl: env.APP_STORE_URL || '',
     // playStoreUrl: env.PLAY_STORE_URL || '',
+  },
+
+  // Database connection parameters
+  db: {
+    host: env.DB_HOST,
+    port: env.DB_PORT,
+    user: env.DB_USER,
+    password: env.DB_PASSWORD,
+    name: env.DB_NAME,
+  },
+
+  twilio: {
+    accountSid: env.TWILIO_ACCOUNT_SID || '',
+    authToken: env.TWILIO_AUTH_TOKEN || '',
+    phoneNumber: env.TWILIO_PHONE_NUMBER || '',
+    enabled: env.TWILIO_ENABLED,
   },
 
   // Admin & Support

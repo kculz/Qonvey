@@ -4,7 +4,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '@/middleware/auth.middleware';
 import { vehicleService } from '@/services/vehicle.service';
-import { VehicleType } from '@prisma/client';
+import { VehicleType } from '@/models/vehicle.model';
 
 export const createVehicle = async (req: AuthRequest, res: Response) => {
   try {

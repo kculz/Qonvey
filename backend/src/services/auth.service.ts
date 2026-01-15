@@ -1,23 +1,23 @@
-// Complete Authentication Service
-// Location: backend/src/services/auth.service.ts
+// backend/src/services/auth.service.ts
 
 import bcrypt from 'bcryptjs';
 import jwt, { Secret, SignOptions } from 'jsonwebtoken';
 import crypto from 'crypto';
-import prisma from '@/config/database';
-import { config } from '@/config/env';
-import { loggers } from '@/utils/logger';
-import { subscriptionService } from '@/services/subscription.service';
-import { notificationService } from '@/services/notification.service';
-import { otpRedis } from '@/utils/redis';
-import { formatPhoneNumber, maskPhoneNumber } from '@/utils/phone';
+import { Op } from 'sequelize';
+import User  from '../models/user.model';
+import { config } from '../config/env';
+import { loggers } from '../utils/logger';
+import { subscriptionService } from './subscription.service';
+import { notificationService } from './notification.service';
+import { otpRedis } from '../utils/redis';
+import { formatPhoneNumber, maskPhoneNumber } from '../utils/phone';
 import type {
   RegisterData,
   LoginData,
   TokenPayload,
   AuthTokens,
   UpdateProfileData,
-} from '@/types/auth.types';
+} from '../types/auth.types';
 
 class AuthService {
   // ============================================
@@ -29,17 +29,17 @@ class AuthService {
     const phoneNumber = formatPhoneNumber(data.phoneNumber);
 
     // Check if user already exists
-    const existingUser = await prisma.user.findFirst({
+    const existingUser = await User.findOne({
       where: {
-        OR: [
-          { phoneNumber },
+        [Op.or]: [
+          { phone_number: phoneNumber },
           ...(data.email ? [{ email: data.email }] : []),
         ],
       },
     });
 
     if (existingUser) {
-      if (existingUser.phoneNumber === phoneNumber) {
+      if (existingUser.phone_number === phoneNumber) {
         throw new Error('Phone number already registered');
       }
       if (data.email && existingUser.email === data.email) {
@@ -50,22 +50,20 @@ class AuthService {
     // Hash password
     const passwordHash = await bcrypt.hash(data.password, 10);
 
-    // Create user with subscription
-    const user = await prisma.user.create({
-      data: {
-        phoneNumber,
-        email: data.email,
-        passwordHash,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        role: data.role,
-        companyName: data.companyName,
-        companyRegistration: data.companyRegistration,
-        driversLicense: data.driversLicense,
-        idDocument: data.idDocument,
-        status: 'PENDING',
-      },
-    });
+    // Create user
+    const user = await User.create({
+      phone_number: phoneNumber,
+      email: data.email,
+      password_hash: passwordHash,
+      first_name: data.firstName,
+      last_name: data.lastName,
+      role: data.role,
+      company_name: data.companyName,
+      company_registration: data.companyRegistration,
+      drivers_license: data.driversLicense,
+      id_document: data.idDocument,
+      status: 'PENDING',
+    } as any);
 
     // Create trial subscription
     await subscriptionService.createTrialSubscription(user.id);
@@ -96,16 +94,16 @@ class AuthService {
 
   async login(data: LoginData, ip?: string) {
     // Find user by phone or email
-    const user = await prisma.user.findFirst({
+    const user = await User.findOne({
       where: {
-        OR: [
-          { phoneNumber: formatPhoneNumber(data.identifier) },
+        [Op.or]: [
+          { phone_number: formatPhoneNumber(data.identifier) },
           { email: data.identifier },
         ],
       },
-      include: {
-        subscription: true,
-      },
+      include: [{
+        association: 'subscription',
+      }],
     });
 
     if (!user) {
@@ -123,17 +121,22 @@ class AuthService {
     }
 
     // Verify password
-    const isPasswordValid = await bcrypt.compare(data.password, user.passwordHash);
+    const isPasswordValid = await bcrypt.compare(data.password, user.password_hash);
     if (!isPasswordValid) {
       loggers.auth.failed(data.identifier, 'Invalid password', ip || '');
       throw new Error('Invalid credentials');
     }
 
     // Check if phone is verified
-    if (!user.phoneVerified) {
+    if (!user.phone_verified) {
       // Generate and send OTP
-      const otp = await this.generateOTP(user.phoneNumber);
-      await notificationService.sendOTP(user.phoneNumber, otp, user.email || undefined, user.firstName);
+      const otp = await this.generateOTP(user.phone_number);
+      await notificationService.sendOTP(
+        user.phone_number, 
+        otp, 
+        user.email || undefined, 
+        user.first_name
+      );
 
       return {
         userId: user.id,
@@ -143,10 +146,7 @@ class AuthService {
     }
 
     // Update last login
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { lastLoginAt: new Date() },
-    });
+    await user.update({ last_login_at: new Date() });
 
     // Generate tokens
     const tokens = this.generateTokens({ userId: user.id, role: user.role });
@@ -154,7 +154,7 @@ class AuthService {
     loggers.auth.login(user.id, ip || '');
 
     // Remove password from response
-    const { passwordHash, ...userWithoutPassword } = user;
+    const { password_hash, ...userWithoutPassword } = user.toJSON();
 
     return {
       user: userWithoutPassword,
@@ -211,15 +211,20 @@ class AuthService {
     await otpRedis.delete(formattedPhone);
 
     // Update user as verified
-    const user = await prisma.user.update({
-      where: { phoneNumber: formattedPhone },
-      data: {
-        phoneVerified: true,
-        status: 'ACTIVE',
-      },
-      include: {
-        subscription: true,
-      },
+    const user = await User.findOne({
+      where: { phone_number: formattedPhone },
+      include: [{
+        association: 'subscription',
+      }],
+    });
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    await user.update({
+      phone_verified: true,
+      status: 'ACTIVE',
     });
 
     // Generate tokens
@@ -227,7 +232,7 @@ class AuthService {
 
     loggers.info('Phone verified', { userId: user.id, phoneNumber: formattedPhone });
 
-    const { passwordHash, ...userWithoutPassword } = user;
+    const { password_hash, ...userWithoutPassword } = user.toJSON();
 
     return {
       user: userWithoutPassword,
@@ -239,15 +244,15 @@ class AuthService {
     const formattedPhone = formatPhoneNumber(phoneNumber);
 
     // Check if user exists
-    const user = await prisma.user.findUnique({
-      where: { phoneNumber: formattedPhone },
+    const user = await User.findOne({
+      where: { phone_number: formattedPhone },
     });
 
     if (!user) {
       throw new Error('User not found');
     }
 
-    if (user.phoneVerified) {
+    if (user.phone_verified) {
       throw new Error('Phone already verified');
     }
 
@@ -255,7 +260,12 @@ class AuthService {
     const otp = await this.generateOTP(formattedPhone);
 
     // Send OTP via SMS and Email
-    await notificationService.sendOTP(formattedPhone, otp, user.email || undefined, user.firstName);
+    await notificationService.sendOTP(
+      formattedPhone, 
+      otp, 
+      user.email || undefined, 
+      user.first_name
+    );
 
     return { message: 'OTP sent successfully' };
   }
@@ -266,10 +276,10 @@ class AuthService {
 
   async forgotPassword(identifier: string) {
     // Find user
-    const user = await prisma.user.findFirst({
+    const user = await User.findOne({
       where: {
-        OR: [
-          { phoneNumber: formatPhoneNumber(identifier) },
+        [Op.or]: [
+          { phone_number: formatPhoneNumber(identifier) },
           { email: identifier },
         ],
       },
@@ -281,14 +291,14 @@ class AuthService {
     }
 
     // Generate OTP
-    const otp = await this.generateOTP(user.phoneNumber);
+    const otp = await this.generateOTP(user.phone_number);
 
     // Send OTP
-    await notificationService.sendOTP(user.phoneNumber, otp);
+    await notificationService.sendOTP(user.phone_number, otp);
 
     return { 
       message: 'OTP sent to your registered phone number',
-      phoneNumber: maskPhoneNumber(user.phoneNumber),
+      phoneNumber: maskPhoneNumber(user.phone_number),
     };
   }
 
@@ -298,14 +308,20 @@ class AuthService {
 
     const formattedPhone = formatPhoneNumber(phoneNumber);
 
+    // Find user
+    const user = await User.findOne({
+      where: { phone_number: formattedPhone },
+    });
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
     // Hash new password
     const passwordHash = await bcrypt.hash(newPassword, 10);
 
     // Update password
-    await prisma.user.update({
-      where: { phoneNumber: formattedPhone },
-      data: { passwordHash },
-    });
+    await user.update({ password_hash: passwordHash });
 
     loggers.info('Password reset', { phoneNumber: formattedPhone });
 
@@ -313,16 +329,14 @@ class AuthService {
   }
 
   async changePassword(userId: string, currentPassword: string, newPassword: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-    });
+    const user = await User.findByPk(userId);
 
     if (!user) {
       throw new Error('User not found');
     }
 
     // Verify current password
-    const isPasswordValid = await bcrypt.compare(currentPassword, user.passwordHash);
+    const isPasswordValid = await bcrypt.compare(currentPassword, user.password_hash);
     if (!isPasswordValid) {
       throw new Error('Current password is incorrect');
     }
@@ -331,10 +345,7 @@ class AuthService {
     const passwordHash = await bcrypt.hash(newPassword, 10);
 
     // Update password
-    await prisma.user.update({
-      where: { id: userId },
-      data: { passwordHash },
-    });
+    await user.update({ password_hash: passwordHash });
 
     loggers.info('Password changed', { userId });
 
@@ -345,17 +356,17 @@ class AuthService {
   // TOKEN MANAGEMENT
   // ============================================
 
-generateTokens(payload: TokenPayload): AuthTokens {
-  const accessToken = jwt.sign(payload, config.jwt.secret as Secret, {
-    expiresIn: config.jwt.expire as SignOptions['expiresIn'],
-  });
+  generateTokens(payload: TokenPayload): AuthTokens {
+    const accessToken = jwt.sign(payload, config.jwt.secret as Secret, {
+      expiresIn: config.jwt.expire as SignOptions['expiresIn'],
+    });
 
-  const refreshToken = jwt.sign(payload, config.jwt.refreshSecret as Secret, {
-    expiresIn: config.jwt.refreshExpire as SignOptions['expiresIn'],
-  });
+    const refreshToken = jwt.sign(payload, config.jwt.refreshSecret as Secret, {
+      expiresIn: config.jwt.refreshExpire as SignOptions['expiresIn'],
+    });
 
-  return { accessToken, refreshToken };
-}
+    return { accessToken, refreshToken };
+  }
 
   verifyAccessToken(token: string): TokenPayload {
     try {
@@ -378,9 +389,7 @@ generateTokens(payload: TokenPayload): AuthTokens {
       const payload = this.verifyRefreshToken(refreshToken);
 
       // Verify user still exists and is active
-      const user = await prisma.user.findUnique({
-        where: { id: payload.userId },
-      });
+      const user = await User.findByPk(payload.userId);
 
       if (!user) {
         throw new Error('User not found');
@@ -402,31 +411,34 @@ generateTokens(payload: TokenPayload): AuthTokens {
   // ============================================
 
   async getCurrentUser(userId: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: {
-        subscription: true,
-        vehicles: {
-          where: { isActive: true },
+    const user = await User.findByPk(userId, {
+      include: [
+        {
+          association: 'subscription',
         },
-      },
+        {
+          association: 'vehicles',
+          where: { is_active: true },
+          required: false,
+        },
+      ],
     });
 
     if (!user) {
       throw new Error('User not found');
     }
 
-    const { passwordHash, ...userWithoutPassword } = user;
+    const { password_hash, ...userWithoutPassword } = user.toJSON();
     return userWithoutPassword;
   }
 
   async updateProfile(userId: string, data: UpdateProfileData) {
     // If updating email, check if it's already taken
     if (data.email) {
-      const existingUser = await prisma.user.findFirst({
+      const existingUser = await User.findOne({
         where: {
           email: data.email,
-          id: { not: userId },
+          id: { [Op.ne]: userId },
         },
       });
 
@@ -435,51 +447,105 @@ generateTokens(payload: TokenPayload): AuthTokens {
       }
     }
 
-    const user = await prisma.user.update({
-      where: { id: userId },
-      data: {
-        ...(data.firstName && { firstName: data.firstName }),
-        ...(data.lastName && { lastName: data.lastName }),
-        ...(data.email && { email: data.email, emailVerified: false }),
-        ...(data.companyName && { companyName: data.companyName }),
-        ...(data.profileImage && { profileImage: data.profileImage }),
-      },
-    });
+    const updateData: any = {};
+    
+    if (data.firstName) updateData.first_name = data.firstName;
+    if (data.lastName) updateData.last_name = data.lastName;
+    if (data.email) {
+      updateData.email = data.email;
+      updateData.email_verified = false;
+    }
+    if (data.companyName) updateData.company_name = data.companyName;
+    if (data.profileImage) updateData.profile_image = data.profileImage;
 
-    const { passwordHash, ...userWithoutPassword } = user;
+    const user = await User.findByPk(userId);
+    
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    await user.update(updateData);
+
+    const { password_hash, ...userWithoutPassword } = user.toJSON();
     return userWithoutPassword;
   }
 
   async updateFCMToken(userId: string, fcmToken: string) {
-    return await prisma.user.update({
-      where: { id: userId },
-      data: { fcmToken },
-    });
+    const user = await User.findByPk(userId);
+    
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    await user.update({ fcm_token: fcmToken });
+    return user;
   }
 
   async deleteAccount(userId: string, password: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-    });
+    const user = await User.findByPk(userId);
 
     if (!user) {
       throw new Error('User not found');
     }
 
     // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
+    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
     if (!isPasswordValid) {
       throw new Error('Invalid password');
     }
 
-    // Delete user (cascade will handle related records)
-    await prisma.user.delete({
-      where: { id: userId },
-    });
+    // Delete user (cascade will handle related records based on model associations)
+    await user.destroy();
 
     loggers.info('Account deleted', { userId });
 
     return { message: 'Account deleted successfully' };
+  }
+
+  // ============================================
+  // ADDITIONAL HELPER METHODS
+  // ============================================
+
+  async findUserByPhone(phoneNumber: string) {
+    const formattedPhone = formatPhoneNumber(phoneNumber);
+    
+    return User.findOne({
+      where: { phone_number: formattedPhone },
+      include: [{
+        association: 'subscription',
+      }],
+    });
+  }
+
+  async findUserByEmail(email: string) {
+    return User.findOne({
+      where: { email },
+      include: [{
+        association: 'subscription',
+      }],
+    });
+  }
+
+  async updateUserStatus(userId: string, status: 'ACTIVE' | 'SUSPENDED' | 'BANNED') {
+    const user = await User.findByPk(userId);
+    
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    await user.update({ status });
+    return user;
+  }
+
+  async verifyEmail(userId: string) {
+    const user = await User.findByPk(userId);
+    
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    await user.update({ email_verified: true });
+    return user;
   }
 }
 

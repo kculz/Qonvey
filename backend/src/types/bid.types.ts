@@ -1,9 +1,15 @@
-import { BidStatus } from '@prisma/client';
-
 export interface CreateBidData {
   loadId: string;
   proposedPrice: number;
   currency?: string;
+  message?: string;
+  estimatedDuration?: number;
+  vehicleId?: string;
+  expiresAt?: Date;
+}
+
+export interface UpdateBidData {
+  proposedPrice?: number;
   message?: string;
   estimatedDuration?: number;
   vehicleId?: string;
@@ -27,8 +33,9 @@ export interface LoadBidStats {
   averageBid: number;
 }
 
-export interface CanBidResponse {
-  allowed: boolean;
-  reason?: string;
+export enum BidStatus {
+  PENDING = 'PENDING',
+  ACCEPTED = 'ACCEPTED',
+  REJECTED = 'REJECTED',
+  WITHDRAWN = 'WITHDRAWN',
 }
-

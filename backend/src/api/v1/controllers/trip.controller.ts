@@ -4,7 +4,8 @@
 import { Response } from 'express';
 import { AuthRequest } from '@/middleware/auth.middleware';
 import { tripService } from '@/services/trip.service';
-import { TripStatus, PaymentMethod } from '@prisma/client';
+import { TripStatus } from '@/models/trip.model';
+import { PaymentMethod } from '@/models/subscription.model';
 
 export const startTrip = async (req: AuthRequest, res: Response) => {
   try {

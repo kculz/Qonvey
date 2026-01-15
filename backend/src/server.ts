@@ -6,13 +6,23 @@ import app from '@/app';
 import { config } from '@/config/env';
 import { loggers } from '@/utils/logger';
 import { socketService } from '@/services/socket.service';
-import prisma from '@/config/database';
+import sequelize from '@/config/database'; // Changed from prisma to sequelize
 
 const startServer = async () => {
   try {
     // Test database connection
-    await prisma.$connect();
+    await sequelize.authenticate(); // Sequelize authentication method
     loggers.info('✅ Database connected successfully');
+
+    // Sync models (use cautiously in production)
+    if (config.env === 'development') {
+      await sequelize.sync({ alter: false }); // Options: force, alter, or nothing
+      loggers.info('✅ Database synced');
+    } else {
+      // In production, you might want to run migrations instead
+      await sequelize.sync();
+      loggers.info('✅ Database models loaded');
+    }
 
     // Create HTTP server
     const httpServer = createServer(app);
@@ -29,6 +39,7 @@ const startServer = async () => {
       loggers.info(`🚀 Server running on port ${config.port}`);
       loggers.info(`📝 Environment: ${config.env}`);
       loggers.info(`🔗 API URL: http://localhost:${config.port}/api/v1`);
+      loggers.info(`🗄️  Database: ${config.db.name}@${config.db.host}`);
     });
 
     // Graceful shutdown
@@ -40,9 +51,9 @@ const startServer = async () => {
         loggers.info('HTTP server closed');
       });
 
-      // Disconnect database
-      await prisma.$disconnect();
-      loggers.info('Database disconnected');
+      // Close database connection
+      await sequelize.close();
+      loggers.info('Database connection closed');
 
       process.exit(0);
     };
@@ -63,6 +74,12 @@ const startServer = async () => {
 
   } catch (error) {
     loggers.error('Failed to start server', error);
+    
+    // Close connection if open
+    if (sequelize) {
+      await sequelize.close();
+    }
+    
     process.exit(1);
   }
 };

@@ -4,7 +4,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '@/middleware/auth.middleware';
 import { bidService } from '@/services/bid.service';
-import { BidStatus } from '@prisma/client';
+import { BidStatus } from '@/models/bid.model';
 
 export const createBid = async (req: AuthRequest, res: Response) => {
   try {

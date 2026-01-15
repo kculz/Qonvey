@@ -4,7 +4,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '@/middleware/auth.middleware';
 import { loadService } from '@/services/load.service';
-import { LoadStatus, VehicleType } from '@prisma/client';
+import { LoadStatus, VehicleType } from '@/models/load.model';
 
 export const createLoad = async (req: AuthRequest, res: Response) => {
   try {

@@ -1,13 +1,28 @@
-// Payment Service - EcoCash/OneMoney Integration
-// Location: backend/src/services/payment.service.ts
+// backend/src/services/payment.service.ts
 
 import { Paynow } from 'paynow';
-import prisma from '@/config/database';
-import { config } from '@/config/env';
-import { loggers } from '@/utils/logger';
-import { PlanType, PaymentMethod } from '@prisma/client';
-import { subscriptionService } from '@/services/subscription.service';
-import type { PaymentResult, PaymentStatus } from '@/types/payment.types';
+import { config } from '../config/env';
+import { loggers } from '../utils/logger';
+import { subscriptionService } from './subscription.service';
+import type { PaymentResult, PaymentStatus } from '../types/payment.types';
+import User from '@/models/user.model';
+import SubscriptionInvoice from '@/models/subscription-invoice.model';
+import { Op } from 'sequelize';
+
+export enum PlanType {
+  FREE = 'FREE',
+  STARTER = 'STARTER',
+  PROFESSIONAL = 'PROFESSIONAL',
+  BUSINESS = 'BUSINESS',
+}
+
+export enum PaymentMethod {
+  CASH = 'CASH',
+  ECOCASH = 'ECOCASH',
+  ONEMONEY = 'ONEMONEY',
+  BANK_TRANSFER = 'BANK_TRANSFER',
+  CARD = 'CARD',
+}
 
 class PaymentService {
   private paynow: Paynow | null = null;
@@ -43,9 +58,9 @@ class PaymentService {
 
       // Get pricing
       const prices = {
-        STARTER: config.subscription.prices.starter,
-        PROFESSIONAL: config.subscription.prices.professional,
-        BUSINESS: config.subscription.prices.business,
+        STARTER: config.payment.subscriptionPrices?.STARTER || 3,
+        PROFESSIONAL: config.payment.subscriptionPrices?.PROFESSIONAL || 5,
+        BUSINESS: config.payment.subscriptionPrices?.BUSINESS || 7,
       };
 
       const amount = prices[plan as keyof typeof prices];
@@ -57,31 +72,30 @@ class PaymentService {
       }
 
       // Get user details
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        include: { subscription: true },
+      const user = await User.findByPk(userId, {
+        include: [{
+          association: 'subscription',
+        }],
       });
 
-      if (!user) {
+      if (!user || !user.subscription) {
         return {
           success: false,
-          error: 'User not found',
+          error: 'User or subscription not found',
         };
       }
 
       // Create invoice
-      const invoice = await prisma.subscriptionInvoice.create({
-        data: {
-          subscriptionId: user.subscription!.id,
-          userId,
-          plan,
-          amount,
-          currency: 'USD',
-          billingPeriod: this.getCurrentBillingPeriod(),
-          dueDate: new Date(),
-          status: 'PENDING',
-        },
-      });
+      const invoice = await SubscriptionInvoice.create({
+        subscription_id: user.subscription.id,
+        user_id: userId,
+        plan,
+        amount,
+        currency: 'USD',
+        billing_period: this.getCurrentBillingPeriod(),
+        due_date: new Date(),
+        status: 'PENDING',
+      } as any);
 
       loggers.info('Payment initiated', { userId, plan, amount, invoiceId: invoice.id });
 
@@ -110,12 +124,9 @@ class PaymentService {
 
       // Update invoice with payment details
       if (paymentResult.success && paymentResult.reference) {
-        await prisma.subscriptionInvoice.update({
-          where: { id: invoice.id },
-          data: {
-            reference: paymentResult.reference,
-            paymentMethod: method,
-          },
+        await invoice.update({
+          reference: paymentResult.reference,
+          payment_method: method,
         });
       }
 
@@ -147,13 +158,13 @@ class PaymentService {
       }
 
       // Create payment
-      const payment = this.paynow.createPayment(invoiceId, user.email || user.phoneNumber);
+      const payment = this.paynow.createPayment(invoiceId, user.email || user.phone_number);
       payment.add('Qonvey Subscription', amount);
 
       // Send mobile payment request
       const response = await this.paynow.sendMobile(
         payment,
-        user.phoneNumber,
+        user.phone_number,
         'ecocash'
       );
 
@@ -199,12 +210,12 @@ class PaymentService {
         };
       }
 
-      const payment = this.paynow.createPayment(invoiceId, user.email || user.phoneNumber);
+      const payment = this.paynow.createPayment(invoiceId, user.email || user.phone_number);
       payment.add('Qonvey Subscription', amount);
 
       const response = await this.paynow.sendMobile(
         payment,
-        user.phoneNumber,
+        user.phone_number,
         'onemoney'
       );
 
@@ -250,7 +261,7 @@ class PaymentService {
         };
       }
 
-      const payment = this.paynow.createPayment(invoiceId, user.email || user.phoneNumber);
+      const payment = this.paynow.createPayment(invoiceId, user.email || user.phone_number);
       payment.add('Qonvey Subscription', amount);
 
       const response = await this.paynow.send(payment);
@@ -290,10 +301,25 @@ class PaymentService {
     invoiceId: string
   ): Promise<PaymentResult> {
     // Bank transfer details for manual payment
+    const bankDetails = {
+      bankName: config.bank.name || 'CBZ Bank',
+      accountName: config.bank.accountName || 'Qonvey Zimbabwe',
+      accountNumber: config.bank.accountNumber || '1234567890',
+      branchCode: config.bank.branchCode || '1001',
+      swiftCode: config.bank.swiftCode || 'CBZAZWHX',
+    };
+
     return {
       success: true,
       reference: invoiceId,
-      message: `Please transfer $${amount} to our bank account and use reference: ${invoiceId}`,
+      message: `Please transfer $${amount} to:\n\n` +
+               `Bank: ${bankDetails.bankName}\n` +
+               `Account Name: ${bankDetails.accountName}\n` +
+               `Account Number: ${bankDetails.accountNumber}\n` +
+               `Branch Code: ${bankDetails.branchCode}\n` +
+               `Swift Code: ${bankDetails.swiftCode}\n\n` +
+               `Use reference: ${invoiceId}`,
+      bankDetails,
     };
   }
 
@@ -314,7 +340,7 @@ class PaymentService {
         amount: status.amount,
         reference: status.reference,
         status: status.status,
-        message: status.message,
+        // message: status.message,
       };
     } catch (error: any) {
       loggers.error('Payment status check failed', error);
@@ -328,34 +354,33 @@ class PaymentService {
 
       if (status.paid) {
         // Find invoice by reference
-        const invoice = await prisma.subscriptionInvoice.findFirst({
+        const invoice = await SubscriptionInvoice.findOne({
           where: { reference },
-          include: { subscription: true },
+          include: [{
+            association: 'subscription',
+          }],
         });
 
-        if (!invoice) {
-          loggers.error('Invoice not found for reference', { reference });
+        if (!invoice || !invoice.subscription) {
+          loggers.error('Invoice or subscription not found for reference', { reference });
           return false;
         }
 
         // Update invoice
-        await prisma.subscriptionInvoice.update({
-          where: { id: invoice.id },
-          data: {
-            status: 'PAID',
-            paidAt: new Date(),
-          },
+        await invoice.update({
+          status: 'PAID',
+          paid_at: new Date(),
         });
 
         // Upgrade subscription
         await subscriptionService.upgradePlan(
-          invoice.userId,
+          invoice.user_id,
           invoice.plan,
           reference
         );
 
         loggers.subscription.paymentSuccess(
-          invoice.userId,
+          invoice.user_id,
           invoice.amount,
           invoice.plan
         );
@@ -385,18 +410,15 @@ class PaymentService {
         await this.confirmPayment(reference);
       } else if (status === 'Cancelled' || status === 'Failed') {
         // Update invoice status
-        const invoice = await prisma.subscriptionInvoice.findFirst({
+        const invoice = await SubscriptionInvoice.findOne({
           where: { reference },
         });
 
         if (invoice) {
-          await prisma.subscriptionInvoice.update({
-            where: { id: invoice.id },
-            data: { status: 'CANCELLED' },
-          });
+          await invoice.update({ status: 'CANCELLED' });
 
           loggers.subscription.paymentFailed(
-            invoice.userId,
+            invoice.user_id,
             invoice.amount,
             status
           );
@@ -412,81 +434,151 @@ class PaymentService {
   // ============================================
 
   async createInvoice(userId: string, plan: PlanType, amount: number) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: { subscription: true },
+    const user = await User.findByPk(userId, {
+      include: [{
+        association: 'subscription',
+      }],
     });
 
     if (!user || !user.subscription) {
       throw new Error('User or subscription not found');
     }
 
-    const invoice = await prisma.subscriptionInvoice.create({
-      data: {
-        subscriptionId: user.subscription.id,
-        userId,
-        plan,
-        amount,
-        currency: 'USD',
-        billingPeriod: this.getCurrentBillingPeriod(),
-        dueDate: new Date(),
-        status: 'PENDING',
-      },
-    });
+    const invoice = await SubscriptionInvoice.create({
+      subscription_id: user.subscription.id,
+      user_id: userId,
+      plan,
+      amount,
+      currency: 'USD',
+      billing_period: this.getCurrentBillingPeriod(),
+      due_date: new Date(),
+      status: 'PENDING',
+    } as any);
 
     return invoice;
   }
 
   async getInvoices(userId: string) {
-    return await prisma.subscriptionInvoice.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
+    return await SubscriptionInvoice.findAll({
+      where: { user_id: userId },
+      order: [['created_at', 'DESC']],
     });
   }
 
   async getInvoice(invoiceId: string) {
-    return await prisma.subscriptionInvoice.findUnique({
-      where: { id: invoiceId },
-      include: {
-        subscription: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                phoneNumber: true,
-                companyName: true,
-              },
-            },
-          },
+    return await SubscriptionInvoice.findByPk(invoiceId, {
+      include: [
+        {
+          association: 'subscription',
+          include: [{
+            association: 'user',
+            attributes: ['id', 'first_name', 'last_name', 'email', 'phone_number', 'company_name'],
+          }],
         },
-      },
+      ],
     });
   }
 
-  async markInvoiceAsPaid(invoiceId: string, reference: string) {
-    const invoice = await prisma.subscriptionInvoice.update({
-      where: { id: invoiceId },
-      data: {
-        status: 'PAID',
-        paidAt: new Date(),
-        reference,
-      },
+  async markInvoiceAsPaid(invoiceId: string, reference: string, paymentMethod?: PaymentMethod) {
+    const invoice = await SubscriptionInvoice.findByPk(invoiceId);
+    
+    if (!invoice) {
+      throw new Error('Invoice not found');
+    }
+
+    await invoice.update({
+      status: 'PAID',
+      paid_at: new Date(),
+      reference,
+      ...(paymentMethod && { payment_method: paymentMethod }),
     });
 
     // Upgrade user's subscription
-    await subscriptionService.upgradePlan(invoice.userId, invoice.plan, reference);
+    await subscriptionService.upgradePlan(invoice.user_id, invoice.plan, reference);
 
     return invoice;
   }
 
   async cancelInvoice(invoiceId: string) {
-    return await prisma.subscriptionInvoice.update({
-      where: { id: invoiceId },
-      data: { status: 'CANCELLED' },
+    const invoice = await SubscriptionInvoice.findByPk(invoiceId);
+    
+    if (!invoice) {
+      throw new Error('Invoice not found');
+    }
+
+    await invoice.update({ status: 'CANCELLED' });
+    return invoice;
+  }
+
+  // ============================================
+  // NEW METHODS FOR SEQUELIZE
+  // ============================================
+
+  async getPendingInvoices(userId?: string) {
+    const whereClause: any = { status: 'PENDING' };
+    if (userId) {
+      whereClause.user_id = userId;
+    }
+
+    return await SubscriptionInvoice.findAll({
+      where: whereClause,
+      include: [{
+        association: 'subscription',
+        include: [{
+          association: 'user',
+          attributes: ['id', 'first_name', 'last_name', 'phone_number'],
+        }],
+      }],
+      order: [['due_date', 'ASC']],
     });
+  }
+
+  async getOverdueInvoices() {
+    return await SubscriptionInvoice.findAll({
+      where: {
+        status: 'PENDING',
+        due_date: { [Op.lt]: new Date() },
+      },
+      include: [{
+        association: 'subscription',
+        include: [{
+          association: 'user',
+          attributes: ['id', 'first_name', 'last_name', 'email', 'phone_number'],
+        }],
+      }],
+      order: [['due_date', 'ASC']],
+    });
+  }
+
+  async getPaymentSummary(userId: string) {
+    const [totalInvoices, paidInvoices, pendingInvoices, totalAmount] = await Promise.all([
+      SubscriptionInvoice.count({ where: { user_id: userId } }),
+      SubscriptionInvoice.count({ where: { user_id: userId, status: 'PAID' } }),
+      SubscriptionInvoice.count({ where: { user_id: userId, status: 'PENDING' } }),
+      SubscriptionInvoice.sum('amount', { where: { user_id: userId, status: 'PAID' } }),
+    ]);
+
+    return {
+      totalInvoices,
+      paidInvoices,
+      pendingInvoices,
+      totalAmount: totalAmount || 0,
+    };
+  }
+
+  async validatePaymentMethod(method: PaymentMethod): Promise<boolean> {
+    switch (method) {
+      case PaymentMethod.ECOCASH:
+      case PaymentMethod.ONEMONEY:
+      case PaymentMethod.CARD:
+        return config.payment.paynow.enabled === true;
+      case PaymentMethod.BANK_TRANSFER:
+        return true; // Always available
+      case PaymentMethod.CASH:
+        return true; // Always available
+      default:
+        return false;
+    }
   }
 
   // ============================================
@@ -503,26 +595,45 @@ class PaymentService {
   }
 
   async getPaymentMethods() {
+    const bankDetails = config.bank.name ? {
+      bankName: config.bank.name,
+      accountName: config.bank.accountName,
+      accountNumber: config.bank.accountNumber,
+      branchCode: config.bank.branchCode,
+      swiftCode: config.bank.swiftCode,
+    } : undefined;
+
     return {
       ecocash: {
-        enabled: config.payment.paynow.enabled,
+        enabled: config.payment.paynow.enabled === true,
         name: 'EcoCash',
         description: 'Pay with your EcoCash mobile money',
+        icon: 'ecocash-icon',
       },
       onemoney: {
-        enabled: config.payment.paynow.enabled,
+        enabled: config.payment.paynow.enabled === true,
         name: 'OneMoney',
         description: 'Pay with your OneMoney account',
+        icon: 'onemoney-icon',
       },
       card: {
-        enabled: config.payment.paynow.enabled,
+        enabled: config.payment.paynow.enabled === true,
         name: 'Credit/Debit Card',
         description: 'Pay with Visa or Mastercard',
+        icon: 'card-icon',
       },
       bank: {
         enabled: true,
         name: 'Bank Transfer',
         description: 'Direct bank transfer',
+        icon: 'bank-icon',
+        details: bankDetails,
+      },
+      cash: {
+        enabled: true,
+        name: 'Cash Payment',
+        description: 'Pay in cash at our offices',
+        icon: 'cash-icon',
       },
     };
   }

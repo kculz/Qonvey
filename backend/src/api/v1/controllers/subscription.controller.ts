@@ -4,7 +4,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '@/middleware/auth.middleware';
 import { subscriptionService } from '@/services/subscription.service';
-import { PlanType } from '@prisma/client';
+import { PlanType } from '@/models/subscription.model';
 
 export const getSubscription = async (req: AuthRequest, res: Response) => {
   try {

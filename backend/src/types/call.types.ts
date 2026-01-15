@@ -1,22 +1,25 @@
-// Re-export Prisma enums for convenience
-export { CallStatus, CallType } from '@prisma/client';
-
 export interface InitiateCallData {
   receiverId: string;
-  type: CallType;
+  type: 'AUDIO' | 'VIDEO';
   loadId?: string;
   bidId?: string;
 }
 
 export interface CallResponse {
-  callId: string;
-  status: CallStatus;
-  caller: any;
-  receiver: any;
-  type: CallType;
-  duration?: number;
+  id: string;
+  callerId: string;
+  receiverId: string;
+  type: string;
+  status: string;
+  loadId?: string;
+  bidId?: string;
   startedAt?: Date;
   endedAt?: Date;
+  duration?: number;
+  createdAt: Date;
+  updatedAt: Date;
+  caller?: any;
+  receiver?: any;
 }
 
 export interface CallHistoryResponse {
@@ -38,3 +41,23 @@ export interface CallStats {
   averageDuration: number;
 }
 
+export interface ActiveCall {
+  id: string;
+  callerId: string;
+  receiverId: string;
+  type: string;
+  status: string;
+  createdAt: Date;
+  caller: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    profileImage?: string;
+  };
+  receiver: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    profileImage?: string;
+  };
+}

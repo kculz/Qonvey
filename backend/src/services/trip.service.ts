@@ -1,11 +1,28 @@
-// Trip Management Service
-// Location: backend/src/services/trip.service.ts
+// backend/src/services/trip.service.ts
 
-import prisma from '@/config/database';
-import { loggers } from '@/utils/logger';
-import { notificationService } from '@/services/notification.service';
-import { TripStatus, PaymentMethod } from '@prisma/client';
-import type { LocationUpdate, TripUpdateData } from '@/types/trip.types';
+import { Op } from 'sequelize';
+import { loggers } from '../utils/logger';
+import { notificationService } from './notification.service';
+import { sequelize } from '../models';
+import type { LocationUpdate, TripUpdateData } from '../types/trip.types';
+import Trip from '@/models/trip.model';
+import Load from '@/models/load.model';
+import Bid from '@/models/bid.model';
+
+export enum TripStatus {
+  SCHEDULED = 'SCHEDULED',
+  IN_PROGRESS = 'IN_PROGRESS',
+  COMPLETED = 'COMPLETED',
+  CANCELLED = 'CANCELLED',
+}
+
+export enum PaymentMethod {
+  CASH = 'CASH',
+  ECOCASH = 'ECOCASH',
+  ONEMONEY = 'ONEMONEY',
+  BANK_TRANSFER = 'BANK_TRANSFER',
+  CARD = 'CARD',
+}
 
 class TripService {
   // ============================================
@@ -13,36 +30,27 @@ class TripService {
   // ============================================
 
   async startTrip(tripId: string, driverId: string, currentLocation?: LocationUpdate) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-      include: {
-        load: {
-          include: {
-            owner: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                phoneNumber: true,
-              },
-            },
-          },
+    const trip = await Trip.findByPk(tripId, {
+      include: [
+        {
+          association: 'load',
+          include: [{
+            association: 'owner',
+            attributes: ['id', 'first_name', 'last_name', 'phone_number'],
+          }],
         },
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name'],
         },
-      },
+      ],
     });
 
     if (!trip) {
       throw new Error('Trip not found');
     }
 
-    if (trip.driverId !== driverId) {
+    if (trip.driver_id !== driverId) {
       throw new Error('Unauthorized');
     }
 
@@ -50,46 +58,44 @@ class TripService {
       throw new Error('Trip cannot be started in current status');
     }
 
-    const updatedTrip = await prisma.trip.update({
-      where: { id: tripId },
-      data: {
-        status: 'IN_PROGRESS',
-        startTime: new Date(),
-        ...(currentLocation && {
-          currentLocation: currentLocation as any,
-          route: [currentLocation],
-        }),
-      },
-    });
+    const updateData: any = {
+      status: 'IN_PROGRESS',
+      start_time: new Date(),
+    };
+
+    if (currentLocation) {
+      updateData.current_location = currentLocation;
+      updateData.route = [currentLocation];
+    }
+
+    await trip.update(updateData);
 
     // Update load status
-    await prisma.load.update({
-      where: { id: trip.loadId },
-      data: { status: 'IN_TRANSIT' },
-    });
+    await Load.update(
+      { status: 'IN_TRANSIT' },
+      { where: { id: trip.load_id } }
+    );
 
-    loggers.trip.started(tripId, driverId, trip.loadId);
+    loggers.trip.started(tripId, driverId, trip.load_id);
 
     // Notify cargo owner
     await notificationService.notifyTripStarted(
-      trip.load.ownerId,
+      trip.load.owner_id,
       trip.load.title,
-      `${trip.driver.firstName} ${trip.driver.lastName}`
+      `${trip.driver.first_name} ${trip.driver.last_name}`
     );
 
-    return updatedTrip;
+    return trip;
   }
 
   async updateLocation(tripId: string, driverId: string, location: LocationUpdate) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-    });
+    const trip = await Trip.findByPk(tripId);
 
     if (!trip) {
       throw new Error('Trip not found');
     }
 
-    if (trip.driverId !== driverId) {
+    if (trip.driver_id !== driverId) {
       throw new Error('Unauthorized');
     }
 
@@ -98,30 +104,25 @@ class TripService {
     }
 
     // Add location to route
-    const currentRoute = (trip.route as any[]) || [];
+    const currentRoute = trip.route || [];
     const updatedRoute = [...currentRoute, location];
 
-    const updatedTrip = await prisma.trip.update({
-      where: { id: tripId },
-      data: {
-        currentLocation: location as any,
-        route: updatedRoute as any,
-      },
+    await trip.update({
+      current_location: location,
+      route: updatedRoute,
     });
 
-    return updatedTrip;
+    return trip;
   }
 
   async uploadProofOfPickup(tripId: string, driverId: string, imageUrl: string) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-    });
+    const trip = await Trip.findByPk(tripId);
 
     if (!trip) {
       throw new Error('Trip not found');
     }
 
-    if (trip.driverId !== driverId) {
+    if (trip.driver_id !== driverId) {
       throw new Error('Unauthorized');
     }
 
@@ -129,25 +130,19 @@ class TripService {
       throw new Error('Can only upload proof of pickup for trips in progress');
     }
 
-    const updatedTrip = await prisma.trip.update({
-      where: { id: tripId },
-      data: { proofOfPickup: imageUrl },
-    });
-
+    await trip.update({ proof_of_pickup: imageUrl });
     loggers.info('Proof of pickup uploaded', { tripId, driverId });
-    return updatedTrip;
+    return trip;
   }
 
   async uploadProofOfDelivery(tripId: string, driverId: string, imageUrl: string, signature?: string) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-    });
+    const trip = await Trip.findByPk(tripId);
 
     if (!trip) {
       throw new Error('Trip not found');
     }
 
-    if (trip.driverId !== driverId) {
+    if (trip.driver_id !== driverId) {
       throw new Error('Unauthorized');
     }
 
@@ -155,41 +150,30 @@ class TripService {
       throw new Error('Can only upload proof of delivery for trips in progress');
     }
 
-    const updatedTrip = await prisma.trip.update({
-      where: { id: tripId },
-      data: {
-        proofOfDelivery: imageUrl,
-        ...(signature && { signature }),
-      },
-    });
+    const updateData: any = { proof_of_delivery: imageUrl };
+    if (signature) updateData.signature = signature;
 
+    await trip.update(updateData);
     loggers.info('Proof of delivery uploaded', { tripId, driverId });
-    return updatedTrip;
+    return trip;
   }
 
   async completeTrip(tripId: string, driverId: string, data: TripUpdateData) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-      include: {
-        load: {
-          include: {
-            owner: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
-          },
-        },
-      },
+    const trip = await Trip.findByPk(tripId, {
+      include: [{
+        association: 'load',
+        include: [{
+          association: 'owner',
+          attributes: ['id', 'first_name', 'last_name'],
+        }],
+      }],
     });
 
     if (!trip) {
       throw new Error('Trip not found');
     }
 
-    if (trip.driverId !== driverId) {
+    if (trip.driver_id !== driverId) {
       throw new Error('Unauthorized');
     }
 
@@ -198,61 +182,65 @@ class TripService {
     }
 
     // Require proof of delivery
-    if (!data.proofOfDelivery && !trip.proofOfDelivery) {
+    if (!data.proofOfDelivery && !trip.proof_of_delivery) {
       throw new Error('Proof of delivery is required');
     }
 
-    const duration = trip.startTime 
-      ? Math.floor((new Date().getTime() - trip.startTime.getTime()) / 1000 / 60) // minutes
+    const duration = trip.start_time 
+      ? Math.floor((new Date().getTime() - trip.start_time.getTime()) / 1000 / 60) // minutes
       : 0;
 
-    const completedTrip = await prisma.$transaction(async (tx) => {
+    const transaction = await sequelize.transaction();
+
+    try {
       // Update trip
-      const updated = await tx.trip.update({
-        where: { id: tripId },
-        data: {
-          status: 'COMPLETED',
-          endTime: new Date(),
-          paymentMethod: data.paymentMethod,
-          notes: data.notes,
-          ...(data.proofOfDelivery && { proofOfDelivery: data.proofOfDelivery }),
-          ...(data.signature && { signature: data.signature }),
-        },
-      });
+      const updateData: any = {
+        status: 'COMPLETED',
+        end_time: new Date(),
+        ...(data.paymentMethod && { payment_method: data.paymentMethod }),
+        ...(data.notes && { notes: data.notes }),
+        ...(data.proofOfDelivery && { proof_of_delivery: data.proofOfDelivery }),
+        ...(data.signature && { signature: data.signature }),
+      };
+
+      await trip.update(updateData, { transaction });
 
       // Update load status
-      await tx.load.update({
-        where: { id: trip.loadId },
-        data: { status: 'DELIVERED' },
-      });
+      await Load.update(
+        { status: 'DELIVERED' },
+        { where: { id: trip.load_id }, transaction }
+      );
 
-      return updated;
-    });
+      await transaction.commit();
 
-    loggers.trip.completed(tripId, driverId, duration);
+      loggers.trip.completed(tripId, driverId, duration);
 
-    // Notify cargo owner
-    await notificationService.notifyTripCompleted(
-      trip.load.ownerId,
-      trip.load.title
-    );
+      // Notify cargo owner
+      if (trip.load && trip.load.owner_id) {
+        await notificationService.notifyTripCompleted(
+          trip.load.owner_id,
+          trip.load.title
+        );
+      }
 
-    return completedTrip;
+      return trip;
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   }
 
   async cancelTrip(tripId: string, userId: string, reason: string) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-      include: {
-        load: true,
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
+    const trip = await Trip.findByPk(tripId, {
+      include: [
+        {
+          association: 'load',
         },
-      },
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name'],
+        },
+      ],
     });
 
     if (!trip) {
@@ -260,7 +248,7 @@ class TripService {
     }
 
     // Only driver or cargo owner can cancel
-    if (trip.driverId !== userId && trip.load.ownerId !== userId) {
+    if (trip.driver_id !== userId && trip.load.owner_id !== userId) {
       throw new Error('Unauthorized');
     }
 
@@ -268,43 +256,47 @@ class TripService {
       throw new Error('Cannot cancel completed trip');
     }
 
-    const cancelledTrip = await prisma.$transaction(async (tx) => {
+    const transaction = await sequelize.transaction();
+
+    try {
       // Update trip
-      const updated = await tx.trip.update({
-        where: { id: tripId },
-        data: {
-          status: 'CANCELLED',
-          notes: reason,
-        },
-      });
+      await trip.update({
+        status: 'CANCELLED',
+        notes: reason,
+      }, { transaction });
 
       // Update load status back to OPEN
-      await tx.load.update({
-        where: { id: trip.loadId },
-        data: { status: 'OPEN' },
-      });
+      await Load.update(
+        { status: 'OPEN' },
+        { where: { id: trip.load_id }, transaction }
+      );
 
       // Update bid status back to PENDING
-      await tx.bid.update({
-        where: { id: trip.bidId },
-        data: { status: 'PENDING' },
-      });
+      await Bid.update(
+        { status: 'PENDING' },
+        { where: { id: trip.bid_id }, transaction }
+      );
 
-      return updated;
-    });
+      await transaction.commit();
 
-    loggers.trip.cancelled(tripId, reason);
+      loggers.trip.cancelled(tripId, reason);
 
-    // Notify the other party
-    const notifyUserId = userId === trip.driverId ? trip.load.ownerId : trip.driverId;
-    await notificationService.sendPushNotification(notifyUserId, {
-      title: 'Trip Cancelled',
-      body: `Trip for "${trip.load.title}" has been cancelled. Reason: ${reason}`,
-      type: 'TRIP_CANCELLED',
-      data: { tripId, reason },
-    });
+      // Notify the other party
+      const notifyUserId = userId === trip.driver_id ? trip.load.owner_id : trip.driver_id;
+      if (notifyUserId) {
+        await notificationService.sendPushNotification(notifyUserId, {
+          title: 'Trip Cancelled',
+          body: `Trip for "${trip.load.title}" has been cancelled. Reason: ${reason}`,
+          type: 'TRIP_CANCELLED',
+          data: { tripId, reason },
+        });
+      }
 
-    return cancelledTrip;
+      return trip;
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   }
 
   // ============================================
@@ -312,43 +304,29 @@ class TripService {
   // ============================================
 
   async getTrip(tripId: string) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-      include: {
-        load: {
-          include: {
-            owner: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                companyName: true,
-                phoneNumber: true,
-                email: true,
-                rating: true,
-              },
-            },
-          },
+    const trip = await Trip.findByPk(tripId, {
+      include: [
+        {
+          association: 'load',
+          include: [{
+            association: 'owner',
+            attributes: ['id', 'first_name', 'last_name', 'company_name', 'phone_number', 'email', 'rating'],
+          }],
         },
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            companyName: true,
-            phoneNumber: true,
-            email: true,
-            rating: true,
-            totalRatings: true,
-          },
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'company_name', 'phone_number', 'email', 'rating', 'total_ratings'],
         },
-        bid: {
-          include: {
-            vehicle: true,
-          },
+        {
+          association: 'bid',
+          include: [{
+            association: 'vehicle',
+          }],
         },
-        review: true,
-      },
+        {
+          association: 'review',
+        },
+      ],
     });
 
     if (!trip) {
@@ -360,95 +338,83 @@ class TripService {
 
   async getUserTrips(userId: string, status?: TripStatus, role: 'driver' | 'owner' = 'driver') {
     if (role === 'driver') {
-      return await prisma.trip.findMany({
-        where: {
-          driverId: userId,
-          ...(status && { status }),
-        },
-        include: {
-          load: {
-            include: {
-              owner: {
-                select: {
-                  id: true,
-                  firstName: true,
-                  lastName: true,
-                  companyName: true,
-                  phoneNumber: true,
-                },
-              },
-            },
+      const whereClause: any = { driver_id: userId };
+      if (status) {
+        whereClause.status = status;
+      }
+
+      return await Trip.findAll({
+        where: whereClause,
+        include: [
+          {
+            association: 'load',
+            include: [{
+              association: 'owner',
+              attributes: ['id', 'first_name', 'last_name', 'company_name', 'phone_number'],
+            }],
           },
-          bid: {
-            include: {
-              vehicle: true,
-            },
+          {
+            association: 'bid',
+            include: [{
+              association: 'vehicle',
+            }],
           },
-        },
-        orderBy: { createdAt: 'desc' },
+        ],
+        order: [['created_at', 'DESC']],
       });
     } else {
       // Get trips for loads owned by this user
-      return await prisma.trip.findMany({
-        where: {
-          load: {
-            ownerId: userId,
+      const whereClause: any = {
+        '$load.owner_id$': userId,
+      };
+      if (status) {
+        whereClause.status = status;
+      }
+
+      return await Trip.findAll({
+        where: whereClause,
+        include: [
+          {
+            association: 'load',
           },
-          ...(status && { status }),
-        },
-        include: {
-          load: true,
-          driver: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              phoneNumber: true,
-              rating: true,
-            },
+          {
+            association: 'driver',
+            attributes: ['id', 'first_name', 'last_name', 'phone_number', 'rating'],
           },
-          bid: {
-            include: {
-              vehicle: true,
-            },
+          {
+            association: 'bid',
+            include: [{
+              association: 'vehicle',
+            }],
           },
-        },
-        orderBy: { createdAt: 'desc' },
+        ],
+        order: [['created_at', 'DESC']],
       });
     }
   }
 
   async getActiveTrips(driverId: string) {
-    return await prisma.trip.findMany({
+    return await Trip.findAll({
       where: {
-        driverId,
-        status: { in: ['SCHEDULED', 'IN_PROGRESS'] },
+        driver_id: driverId,
+        status: { [Op.in]: ['SCHEDULED', 'IN_PROGRESS'] },
       },
-      include: {
-        load: {
-          include: {
-            owner: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                phoneNumber: true,
-              },
-            },
-          },
+      include: [
+        {
+          association: 'load',
+          include: [{
+            association: 'owner',
+            attributes: ['id', 'first_name', 'last_name', 'phone_number'],
+          }],
         },
-      },
-      orderBy: { createdAt: 'desc' },
+      ],
+      order: [['created_at', 'DESC']],
     });
   }
 
   async getTripRoute(tripId: string) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-      select: {
-        route: true,
-        currentLocation: true,
-      },
+    const trip = await Trip.findByPk(tripId, {
+      attributes: ['route', 'current_location'],
     });
 
     if (!trip) {
@@ -457,7 +423,7 @@ class TripService {
 
     return {
       route: trip.route || [],
-      currentLocation: trip.currentLocation,
+      currentLocation: trip.current_location,
     };
   }
 
@@ -466,47 +432,58 @@ class TripService {
   // ============================================
 
   async getTripStats(userId: string, role: 'driver' | 'owner' = 'driver') {
-    const whereClause = role === 'driver' 
-      ? { driverId: userId }
-      : { load: { ownerId: userId } };
+    let whereClause: any;
 
-    const [total, scheduled, inProgress, completed, cancelled] = await Promise.all([
-      prisma.trip.count({ where: whereClause }),
-      prisma.trip.count({ where: { ...whereClause, status: 'SCHEDULED' } }),
-      prisma.trip.count({ where: { ...whereClause, status: 'IN_PROGRESS' } }),
-      prisma.trip.count({ where: { ...whereClause, status: 'COMPLETED' } }),
-      prisma.trip.count({ where: { ...whereClause, status: 'CANCELLED' } }),
+    if (role === 'driver') {
+      whereClause = { driver_id: userId };
+    } else {
+      whereClause = { '$load.owner_id$': userId };
+    }
+
+    const [
+      total,
+      scheduled,
+      inProgress,
+      completed,
+      cancelled
+    ] = await Promise.all([
+      Trip.count({ where: whereClause }),
+      Trip.count({ where: { ...whereClause, status: 'SCHEDULED' } }),
+      Trip.count({ where: { ...whereClause, status: 'IN_PROGRESS' } }),
+      Trip.count({ where: { ...whereClause, status: 'COMPLETED' } }),
+      Trip.count({ where: { ...whereClause, status: 'CANCELLED' } }),
     ]);
 
     // Calculate total earnings (for drivers)
     let totalEarnings = 0;
     if (role === 'driver') {
-      const earnings = await prisma.trip.aggregate({
-        where: { driverId: userId, status: 'COMPLETED' },
-        _sum: { agreedPrice: true },
-      });
-      totalEarnings = earnings._sum.agreedPrice || 0;
+      const earnings = await Trip.findOne({
+        attributes: [
+          [sequelize.fn('SUM', sequelize.col('agreed_price')), 'total']
+        ],
+        where: { driver_id: userId, status: 'COMPLETED' },
+        raw: true,
+      }) as { total: number } | null;
+      totalEarnings = earnings?.total || 0;
     }
 
     // Calculate average trip duration
-    const tripsWithDuration = await prisma.trip.findMany({
+    const tripsWithDuration = await Trip.findAll({
       where: {
         ...whereClause,
         status: 'COMPLETED',
-        startTime: { not: null },
-        endTime: { not: null },
+        start_time: { [Op.ne]: null },
+        end_time: { [Op.ne]: null },
       },
-      select: {
-        startTime: true,
-        endTime: true,
-      },
+      attributes: ['start_time', 'end_time'],
+      raw: true,
     });
 
     let avgDuration = 0;
     if (tripsWithDuration.length > 0) {
       const totalDuration = tripsWithDuration.reduce((sum, trip) => {
-        if (trip.startTime && trip.endTime) {
-          const duration = trip.endTime.getTime() - trip.startTime.getTime();
+        if (trip.start_time && trip.end_time) {
+          const duration = new Date(trip.end_time).getTime() - new Date(trip.start_time).getTime();
           return sum + duration;
         }
         return sum;
@@ -527,35 +504,29 @@ class TripService {
   }
 
   async getTripHistory(userId: string, limit = 20) {
-    return await prisma.trip.findMany({
+    return await Trip.findAll({
       where: {
-        OR: [
-          { driverId: userId },
-          { load: { ownerId: userId } },
+        [Op.or]: [
+          { driver_id: userId },
+          { '$load.owner_id$': userId },
         ],
-        status: { in: ['COMPLETED', 'CANCELLED'] },
+        status: { [Op.in]: ['COMPLETED', 'CANCELLED'] },
       },
-      include: {
-        load: {
-          select: {
-            id: true,
-            title: true,
-            pickupLocation: true,
-            deliveryLocation: true,
-          },
+      include: [
+        {
+          association: 'load',
+          attributes: ['id', 'title', 'pickup_location', 'delivery_location'],
         },
-        driver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            rating: true,
-          },
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'rating'],
         },
-        review: true,
-      },
-      orderBy: { endTime: 'desc' },
-      take: limit,
+        {
+          association: 'review',
+        },
+      ],
+      order: [['end_time', 'DESC']],
+      limit,
     });
   }
 
@@ -564,9 +535,10 @@ class TripService {
   // ============================================
 
   async updatePaymentMethod(tripId: string, userId: string, paymentMethod: PaymentMethod) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-      include: { load: true },
+    const trip = await Trip.findByPk(tripId, {
+      include: [{
+        association: 'load',
+      }],
     });
 
     if (!trip) {
@@ -574,20 +546,19 @@ class TripService {
     }
 
     // Only driver or cargo owner can update payment method
-    if (trip.driverId !== userId && trip.load.ownerId !== userId) {
+    if (trip.driver_id !== userId && trip.load.owner_id !== userId) {
       throw new Error('Unauthorized');
     }
 
-    return await prisma.trip.update({
-      where: { id: tripId },
-      data: { paymentMethod },
-    });
+    await trip.update({ payment_method: paymentMethod });
+    return trip;
   }
 
   async markPaymentCompleted(tripId: string, userId: string, paymentMethod: PaymentMethod) {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-      include: { load: true },
+    const trip = await Trip.findByPk(tripId, {
+      include: [{
+        association: 'load',
+      }],
     });
 
     if (!trip) {
@@ -598,15 +569,16 @@ class TripService {
       throw new Error('Trip must be completed before marking payment');
     }
 
-    return await prisma.trip.update({
-      where: { id: tripId },
-      data: {
-        paymentMethod,
-        notes: trip.notes 
-          ? `${trip.notes}\nPayment completed via ${paymentMethod}`
-          : `Payment completed via ${paymentMethod}`,
-      },
+    const notes = trip.notes 
+      ? `${trip.notes}\nPayment completed via ${paymentMethod}`
+      : `Payment completed via ${paymentMethod}`;
+
+    await trip.update({
+      payment_method: paymentMethod,
+      notes,
     });
+
+    return trip;
   }
 
   // ============================================
@@ -614,15 +586,13 @@ class TripService {
   // ============================================
 
   async canStartTrip(tripId: string, driverId: string): Promise<{ allowed: boolean; reason?: string }> {
-    const trip = await prisma.trip.findUnique({
-      where: { id: tripId },
-    });
+    const trip = await Trip.findByPk(tripId);
 
     if (!trip) {
       return { allowed: false, reason: 'Trip not found' };
     }
 
-    if (trip.driverId !== driverId) {
+    if (trip.driver_id !== driverId) {
       return { allowed: false, reason: 'Unauthorized' };
     }
 
@@ -631,11 +601,9 @@ class TripService {
     }
 
     // Check if pickup date is today or past
-    const load = await prisma.load.findUnique({
-      where: { id: trip.loadId },
-    });
+    const load = await Load.findByPk(trip.load_id);
 
-    if (load && load.pickupDate > new Date()) {
+    if (load && load.pickup_date > new Date()) {
       return { 
         allowed: false, 
         reason: 'Trip cannot be started before scheduled pickup date' 
@@ -649,33 +617,160 @@ class TripService {
     const futureDate = new Date();
     futureDate.setDate(futureDate.getDate() + days);
 
-    return await prisma.trip.findMany({
+    return await Trip.findAll({
       where: {
-        driverId,
+        driver_id: driverId,
         status: 'SCHEDULED',
-        load: {
-          pickupDate: {
-            gte: new Date(),
-            lte: futureDate,
-          },
+        '$load.pickup_date$': {
+          [Op.gte]: new Date(),
+          [Op.lte]: futureDate,
         },
       },
-      include: {
-        load: {
-          include: {
-            owner: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                phoneNumber: true,
-              },
-            },
-          },
+      include: [
+        {
+          association: 'load',
+          include: [{
+            association: 'owner',
+            attributes: ['id', 'first_name', 'last_name', 'phone_number'],
+          }],
         },
-      },
-      orderBy: { load: { pickupDate: 'asc' } },
+      ],
+      order: [['$load.pickup_date$', 'ASC']],
     });
+  }
+
+  // ============================================
+  // NEW METHODS FOR SEQUELIZE
+  // ============================================
+
+  async getTripWithDetails(tripId: string) {
+    return await Trip.findByPk(tripId, {
+      include: [
+        {
+          association: 'load',
+          include: [
+            {
+              association: 'owner',
+              attributes: ['id', 'first_name', 'last_name', 'phone_number', 'email'],
+            },
+          ],
+        },
+        {
+          association: 'driver',
+          attributes: ['id', 'first_name', 'last_name', 'phone_number', 'rating'],
+        },
+        {
+          association: 'bid',
+          include: [
+            {
+              association: 'vehicle',
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  async updateTripNotes(tripId: string, userId: string, notes: string) {
+    const trip = await Trip.findByPk(tripId, {
+      include: [{
+        association: 'load',
+      }],
+    });
+
+    if (!trip) {
+      throw new Error('Trip not found');
+    }
+
+    if (trip.driver_id !== userId && trip.load.owner_id !== userId) {
+      throw new Error('Unauthorized');
+    }
+
+    await trip.update({ notes });
+    return trip;
+  }
+
+  async getTodayTrips(userId: string, role: 'driver' | 'owner' = 'driver') {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    if (role === 'driver') {
+      return await Trip.findAll({
+        where: {
+          driver_id: userId,
+          status: { [Op.in]: ['SCHEDULED', 'IN_PROGRESS'] },
+          '$load.pickup_date$': {
+            [Op.gte]: today,
+            [Op.lt]: tomorrow,
+          },
+        },
+        include: [
+          {
+            association: 'load',
+            include: [{
+              association: 'owner',
+              attributes: ['id', 'first_name', 'last_name'],
+            }],
+          },
+        ],
+        order: [['$load.pickup_date$', 'ASC']],
+      });
+    } else {
+      return await Trip.findAll({
+        where: {
+          '$load.owner_id$': userId,
+          status: { [Op.in]: ['SCHEDULED', 'IN_PROGRESS'] },
+          '$load.pickup_date$': {
+            [Op.gte]: today,
+            [Op.lt]: tomorrow,
+          },
+        },
+        include: [
+          {
+            association: 'load',
+          },
+          {
+            association: 'driver',
+            attributes: ['id', 'first_name', 'last_name'],
+          },
+        ],
+        order: [['$load.pickup_date$', 'ASC']],
+      });
+    }
+  }
+
+  async getDriverEarnings(driverId: string, startDate?: Date, endDate?: Date) {
+    const whereClause: any = {
+      driver_id: driverId,
+      status: 'COMPLETED',
+    };
+
+    if (startDate) {
+      whereClause.end_time = { [Op.gte]: startDate };
+    }
+    if (endDate) {
+      whereClause.end_time = { ...whereClause.end_time, [Op.lte]: endDate };
+    }
+
+    const trips = await Trip.findAll({
+      where: whereClause,
+      attributes: ['id', 'agreed_price', 'currency', 'end_time', 'load_id'],
+      include: [{
+        association: 'load',
+        attributes: ['id', 'title'],
+      }],
+      order: [['end_time', 'DESC']],
+    });
+
+    const totalEarnings = trips.reduce((sum, trip) => sum + trip.agreed_price, 0);
+
+    return {
+      trips,
+      totalEarnings,
+      totalTrips: trips.length,
+    };
   }
 }
 

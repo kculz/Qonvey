@@ -1,18 +1,49 @@
+// backend/src/types/upload.types.ts
+
 export interface UploadResult {
   url: string;
+  provider: 'cloudinary' | 'aws' | 'local';
   publicId?: string;
   key?: string;
-  secureUrl?: string;
-  width?: number;
-  height?: number;
-  format?: string;
-  bytes?: number;
-  provider?: 'cloudinary' | 'aws' | 'local';
+  localPath?: string;
+  fileName?: string;
+  originalName?: string;
+  thumbnailUrl?: string;
 }
 
-export interface UploadOptions {
-  folder?: string;
-  resourceType?: 'image' | 'video' | 'raw' | 'auto';
-  transformation?: any;
+export interface FileValidationResult {
+  valid: boolean;
+  error?: string;
+  allowedTypes?: string[];
+  maxSize?: number;
 }
 
+export interface FileStats {
+  exists: boolean;
+  size?: number;
+  modified?: Date;
+  isDirectory?: boolean;
+  mimetype?: string;
+}
+
+export interface ThumbnailOptions {
+  width: number;
+  height: number;
+  quality?: number;
+  format?: 'jpg' | 'png' | 'webp';
+}
+
+export interface UploadConfig {
+  allowedImageTypes: string[];
+  allowedDocumentTypes: string[];
+  maxImageSize: number;
+  maxDocumentSize: number;
+  defaultImageQuality: number;
+  defaultThumbnailSize: number;
+}
+
+export interface StorageProvider {
+  name: string;
+  enabled: boolean;
+  config: any;
+}

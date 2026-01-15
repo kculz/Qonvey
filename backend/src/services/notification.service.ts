@@ -1,13 +1,14 @@
-// Notification Service - SMS, Push, Email
-// Location: backend/src/services/notification.service.ts
+// backend/src/services/notification.service.ts
 
 import twilio from 'twilio';
 import * as admin from 'firebase-admin';
 import nodemailer from 'nodemailer';
-import prisma from '@/config/database';
-import { config } from '@/config/env';
-import { loggers } from '@/utils/logger';
-import type { NotificationData, SendResult } from '@/types/notification.types';
+import { config } from '../config/env';
+import { loggers } from '../utils/logger';
+import type { NotificationData, SendResult } from '../types/notification.types';
+import User from '@/models/user.model';
+import Notification from '@/models/notification.model';
+import { Op } from "sequelize";
 
 class NotificationService {
   private twilioClient: any = null;
@@ -17,7 +18,7 @@ class NotificationService {
   constructor() {
     this.initializeTwilio();
     this.initializeEmail();
-    this.initializeFirebase();
+    // this.initializeFirebase();
   }
 
   // ============================================
@@ -25,10 +26,10 @@ class NotificationService {
   // ============================================
 
   private initializeTwilio() {
-    if (config.sms.twilio.enabled) {
+    if (config.twilio.enabled) {
       this.twilioClient = twilio(
-        config.sms.twilio.accountSid,
-        config.sms.twilio.authToken
+        config.twilio.accountSid,
+        config.twilio.authToken
       );
       loggers.info('Twilio SMS initialized');
     }
@@ -49,26 +50,26 @@ class NotificationService {
     }
   }
 
-  private initializeFirebase() {
-    if (config.firebase.enabled) {
-      try {
-        if (!admin.apps.length) {
-          admin.initializeApp({
-            credential: admin.credential.cert({
-              projectId: config.firebase.projectId,
-              privateKey: config.firebase.privateKey,
-              clientEmail: config.firebase.clientEmail,
-            }),
-            databaseURL: config.firebase.databaseURL,
-          });
-        }
-        this.firebaseInitialized = true;
-        loggers.info('Firebase push notifications initialized');
-      } catch (error: any) {
-        loggers.error('Firebase initialization failed', error);
-      }
-    }
-  }
+  // private initializeFirebase() {
+  //   if (config.firebase.enabled) {
+  //     try {
+  //       if (!admin.apps.length) {
+  //         admin.initializeApp({
+  //           credential: admin.credential.cert({
+  //             projectId: config.firebase.projectId,
+  //             privateKey: config.firebase.privateKey?.replace(/\\n/g, '\n'),
+  //             clientEmail: config.firebase.clientEmail,
+  //           }),
+  //           databaseURL: config.firebase.databaseURL,
+  //         });
+  //       }
+  //       this.firebaseInitialized = true;
+  //       loggers.info('Firebase push notifications initialized');
+  //     } catch (error: any) {
+  //       loggers.error('Firebase initialization failed', error);
+  //     }
+  //   }
+  // }
 
   // ============================================
   // SMS NOTIFICATIONS
@@ -86,7 +87,7 @@ class NotificationService {
 
           const result = await this.twilioClient.messages.create({
             body: message,
-            from: config.sms.twilio.phoneNumber,
+            from: config.twilio.phoneNumber,
             to: formattedPhone,
           });
 
@@ -154,7 +155,7 @@ class NotificationService {
         </div>
         <p>This code is valid for <strong>10 minutes</strong>. Do not share this code with anyone.</p>
         <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
-          If you didn't request this code, please ignore this email or contact support at ${config.support.email}.
+          If you didn't request this code, please ignore this email or contact support at ${config.support.phone}.
         </p>
       </div>
     `;
@@ -244,12 +245,11 @@ class NotificationService {
       }
 
       // Get user's FCM token
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { fcmToken: true },
+      const user = await User.findByPk(userId, {
+        attributes: ['fcm_token'],
       });
 
-      if (!user?.fcmToken) {
+      if (!user?.fcm_token) {
         return {
           success: false,
           error: 'User FCM token not found',
@@ -263,7 +263,7 @@ class NotificationService {
           body: notification.body,
         },
         data: notification.data || {},
-        token: user.fcmToken,
+        token: user.fcm_token,
         android: {
           priority: 'high',
           notification: {
@@ -284,15 +284,13 @@ class NotificationService {
       const response = await admin.messaging().send(message);
 
       // Save notification to database
-      await prisma.notification.create({
-        data: {
-          userId,
-          title: notification.title,
-          body: notification.body,
-          data: notification.data,
-          type: notification.type || 'GENERAL',
-        },
-      });
+      await Notification.create({
+        user_id: userId,
+        title: notification.title,
+        body: notification.body,
+        data: notification.data,
+        type: notification.type || 'GENERAL',
+      } as any);
 
       loggers.notification.sent(userId, notification.type || 'GENERAL', 'push');
 
@@ -316,7 +314,7 @@ class NotificationService {
     const promises = userIds.map(userId => 
       this.sendPushNotification(userId, notification)
     );
-    await Promise.all(promises);
+    await Promise.allSettled(promises);
   }
 
   // ============================================
@@ -373,7 +371,7 @@ class NotificationService {
           <li>Add your vehicle details (for drivers)</li>
           <li>Post your first load or place your first bid</li>
         </ul>
-        <p>Need help? Contact us at ${config.support.email}</p>
+        <p>Need help? Contact us at ${config.admin.phone}</p>
         <p style="margin-top: 30px;">
           <a href="${config.client.url}" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px;">
             Get Started
@@ -461,9 +459,7 @@ class NotificationService {
     notification: NotificationData,
     channels: ('push' | 'sms' | 'email')[] = ['push']
   ) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-    });
+    const user = await User.findByPk(userId);
 
     if (!user) {
       loggers.error('User not found for notification', { userId });
@@ -471,16 +467,16 @@ class NotificationService {
     }
 
     const results = await Promise.allSettled([
-      channels.includes('push') && config.features.emailNotifications
+      channels.includes('push') && config.email.enabled
         ? this.sendPushNotification(userId, notification)
-        : Promise.resolve({ success: false }),
-      channels.includes('sms') && user.phoneNumber && config.features.smsNotifications
-        ? this.sendSMS(user.phoneNumber, notification.body, user.email || undefined, notification.title, `<p>${notification.body}</p>`)
-        : Promise.resolve({ success: false }),
+        : Promise.resolve({ success: false } as SendResult),
+      channels.includes('sms') && user.phone_number && config.twilio.enabled
+        ? this.sendSMS(user.phone_number, notification.body, user.email || undefined, notification.title, `<p>${notification.body}</p>`)
+        : Promise.resolve({ success: false } as SendResult),
       // Send email if explicitly requested or if SMS was sent (to ensure both are sent)
-      (channels.includes('email') || (channels.includes('sms') && user.email)) && user.email && config.features.emailNotifications
+      (channels.includes('email') || (channels.includes('sms') && user.email)) && user.email && config.email.enabled
         ? this.sendEmail(user.email, notification.title, `<p>${notification.body}</p>`)
-        : Promise.resolve({ success: false }),
+        : Promise.resolve({ success: false } as SendResult),
     ]);
 
     loggers.info('Notification sent to user', { userId, channels, results });
@@ -560,40 +556,122 @@ class NotificationService {
   // ============================================
 
   async getUserNotifications(userId: string, limit = 50, unreadOnly = false) {
-    return await prisma.notification.findMany({
-      where: {
-        userId,
-        ...(unreadOnly && { read: false }),
-      },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
+    const whereClause: any = { user_id: userId };
+    if (unreadOnly) {
+      whereClause.read = false;
+    }
+
+    return await Notification.findAll({
+      where: whereClause,
+      order: [['created_at', 'DESC']],
+      limit,
     });
   }
 
   async markNotificationAsRead(notificationId: string) {
-    return await prisma.notification.update({
-      where: { id: notificationId },
-      data: { read: true, readAt: new Date() },
+    const notification = await Notification.findByPk(notificationId);
+    
+    if (!notification) {
+      throw new Error('Notification not found');
+    }
+
+    await notification.update({
+      read: true,
+      read_at: new Date(),
     });
+    
+    return notification;
   }
 
   async markAllAsRead(userId: string) {
-    return await prisma.notification.updateMany({
-      where: { userId, read: false },
-      data: { read: true, readAt: new Date() },
-    });
+    const result = await Notification.update(
+      {
+        read: true,
+        read_at: new Date(),
+      },
+      {
+        where: { user_id: userId, read: false },
+      }
+    );
+
+    return { updated: result[0] };
   }
 
   async deleteNotification(notificationId: string) {
-    return await prisma.notification.delete({
-      where: { id: notificationId },
-    });
+    const notification = await Notification.findByPk(notificationId);
+    
+    if (!notification) {
+      throw new Error('Notification not found');
+    }
+
+    await notification.destroy();
+    return notification;
   }
 
   async getUnreadCount(userId: string) {
-    return await prisma.notification.count({
-      where: { userId, read: false },
+    return await Notification.count({
+      where: { user_id: userId, read: false },
     });
+  }
+
+  // ============================================
+  // NEW METHODS FOR SEQUELIZE
+  // ============================================
+
+  async clearOldNotifications(userId: string, daysOld = 30) {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - daysOld);
+
+    const result = await Notification.destroy({
+      where: {
+        user_id: userId,
+        created_at: { [Op.lt]: cutoffDate },
+      },
+    });
+
+    loggers.info('Cleared old notifications', { userId, deletedCount: result });
+    return result;
+  }
+
+  async sendBulkNotification(userIds: string[], notification: NotificationData) {
+    const results = await Promise.allSettled(
+      userIds.map(userId => this.sendPushNotification(userId, notification))
+    );
+
+    const successful = results.filter(r => r.status === 'fulfilled' && (r as any).value.success).length;
+    const failed = results.length - successful;
+
+    return { total: userIds.length, successful, failed };
+  }
+
+  async getUserNotificationStats(userId: string) {
+    const [total, unread, today, thisWeek] = await Promise.all([
+      Notification.count({ where: { user_id: userId } }),
+      Notification.count({ where: { user_id: userId, read: false } }),
+      Notification.count({
+        where: {
+          user_id: userId,
+          created_at: {
+            [Op.gte]: new Date(new Date().setHours(0, 0, 0, 0)),
+          },
+        },
+      }),
+      Notification.count({
+        where: {
+          user_id: userId,
+          created_at: {
+            [Op.gte]: new Date(new Date().setDate(new Date().getDate() - 7)),
+          },
+        },
+      }),
+    ]);
+
+    return {
+      total,
+      unread,
+      today,
+      thisWeek,
+    };
   }
 
   // ============================================

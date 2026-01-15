@@ -1,12 +1,19 @@
-// backend/src/config/database.ts
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import pg from 'pg';
+import { Sequelize } from 'sequelize-typescript';
 import { config } from './env';
 
-const pool = new pg.Pool({ connectionString: config.database.url });
-const adapter = new PrismaPg(pool);
+const sequelize = new Sequelize({
+  dialect: 'postgres',
+  host: config.db.host,
+  port: config.db.port,
+  username: config.db.user,
+  password: config.db.password,
+  database: config.db.name,
+  models: [__dirname + '/../models/**/*.model.ts'],
+  logging: config.env === 'development' ? console.log : false,
+  define: {
+    timestamps: true,
+    underscored: true,
+  },
+});
 
-const prisma = new PrismaClient({ adapter });
-
-export default prisma;
+export default sequelize;
