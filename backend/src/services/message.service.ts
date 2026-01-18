@@ -3,6 +3,7 @@
 import { Op } from 'sequelize';
 import { loggers } from '../utils/logger';
 import { notificationService } from './notification.service';
+import { socketService } from './socket.service';
 import type { SendMessageData, Conversation } from '../types/message.types';
 import User from '@/models/user.model';
 import Message from '@/models/message.model';
@@ -10,12 +11,7 @@ import Load from '@/models/load.model';
 import Bid from '@/models/bid.model';
 
 class MessageService {
-  // ============================================
-  // SEND & RETRIEVE MESSAGES
-  // ============================================
-
   async sendMessage(senderId: string, data: SendMessageData) {
-    // Verify users exist
     const [sender, receiver] = await Promise.all([
       User.findByPk(senderId),
       User.findByPk(data.receiverId),
@@ -25,7 +21,6 @@ class MessageService {
       throw new Error('Sender or receiver not found');
     }
 
-    // Create message
     const message = await Message.create({
       sender_id: senderId,
       receiver_id: data.receiverId,
@@ -34,7 +29,6 @@ class MessageService {
       bid_id: data.bidId,
     } as any);
 
-    // Fetch message with relationships
     const messageWithRelations = await Message.findByPk(message.id, {
       include: [
         {
@@ -54,18 +48,23 @@ class MessageService {
 
     loggers.info('Message sent', { messageId: message.id, senderId, receiverId: data.receiverId });
 
-    // Send push notification to receiver
-    await notificationService.sendPushNotification(data.receiverId, {
-      title: `Message from ${sender.first_name} ${sender.last_name}`,
-      body: data.content.substring(0, 100),
-      type: 'NEW_MESSAGE',
-      data: { 
-        messageId: message.id, 
-        senderId,
-        loadId: data.loadId,
-        bidId: data.bidId,
-      },
-    });
+    // Emit via WebSocket
+    socketService.emitNewMessage(data.receiverId, messageWithRelations);
+
+    // Send push notification only if user is offline
+    if (!socketService.isUserOnline(data.receiverId)) {
+      await notificationService.sendPushNotification(data.receiverId, {
+        title: `Message from ${sender.first_name} ${sender.last_name}`,
+        body: data.content.substring(0, 100),
+        type: 'NEW_MESSAGE',
+        data: { 
+          messageId: message.id, 
+          senderId,
+          loadId: data.loadId,
+          bidId: data.bidId,
+        },
+      });
+    }
 
     return messageWithRelations;
   }
@@ -95,7 +94,6 @@ class MessageService {
       limit,
     });
 
-    // Mark messages as read
     await Message.update(
       {
         read: true,
@@ -122,7 +120,6 @@ class MessageService {
   }
 
   async getConversations(userId: string): Promise<Conversation[]> {
-    // Get all unique conversation partners
     const sentMessages = await Message.findAll({
       attributes: ['receiver_id'],
       where: { sender_id: userId },
@@ -144,10 +141,8 @@ class MessageService {
 
     const uniqueUserIds = [...new Set(userIds)];
 
-    // Get last message and unread count for each conversation
     const conversations = await Promise.all(
       uniqueUserIds.map(async (otherUserId) => {
-        // Get last message
         const lastMessage = await Message.findOne({
           where: {
             [Op.or]: [
@@ -164,7 +159,6 @@ class MessageService {
           order: [['created_at', 'DESC']],
         });
 
-        // Get unread count
         const unreadCount = await Message.count({
           where: {
             sender_id: otherUserId,
@@ -173,20 +167,21 @@ class MessageService {
           },
         });
 
-        // Get other user info
         const otherUser = await User.findByPk(otherUserId, {
           attributes: ['id', 'first_name', 'last_name', 'profile_image', 'status'],
         });
+
+        const isOnline = socketService.isUserOnline(otherUserId);
 
         return {
           user: otherUser,
           lastMessage,
           unreadCount,
+          isOnline,
         };
       })
     );
 
-    // Sort by last message date
     conversations.sort((a, b) => {
       const dateA = a.lastMessage?.createdAt || new Date(0);
       const dateB = b.lastMessage?.createdAt || new Date(0);
@@ -197,7 +192,13 @@ class MessageService {
   }
 
   async markAsRead(messageId: string, userId: string) {
-    const message = await Message.findByPk(messageId);
+    const message = await Message.findByPk(messageId, {
+      include: [
+        {
+          association: 'sender',
+        },
+      ],
+    });
 
     if (!message) {
       throw new Error('Message not found');
@@ -211,6 +212,8 @@ class MessageService {
       read: true,
       read_at: new Date(),
     });
+
+    socketService.emitMessageRead(message.sender_id, messageId, userId);
 
     return message;
   }
@@ -230,12 +233,7 @@ class MessageService {
     return { success: true };
   }
 
-  // ============================================
-  // LOAD/BID RELATED MESSAGES
-  // ============================================
-
   async getLoadMessages(loadId: string, userId: string) {
-    // Verify user is load owner
     const load = await Load.findByPk(loadId);
 
     if (!load) {
@@ -263,7 +261,6 @@ class MessageService {
   }
 
   async getBidMessages(bidId: string, userId: string) {
-    // Verify user is involved in bid
     const bid = await Bid.findByPk(bidId, {
       include: [{
         association: 'load',
@@ -294,10 +291,6 @@ class MessageService {
     });
   }
 
-  // ============================================
-  // ANALYTICS
-  // ============================================
-
   async getUnreadCount(userId: string): Promise<number> {
     return await Message.count({
       where: {
@@ -322,10 +315,6 @@ class MessageService {
     };
   }
 
-  // ============================================
-  // NEW METHODS FOR SEQUELIZE
-  // ============================================
-
   async markAllAsRead(userId: string, otherUserId?: string) {
     const whereClause: any = {
       receiver_id: userId,
@@ -335,6 +324,11 @@ class MessageService {
     if (otherUserId) {
       whereClause.sender_id = otherUserId;
     }
+
+    const messages = await Message.findAll({
+      where: whereClause,
+      attributes: ['id', 'sender_id'],
+    });
 
     const result = await Message.update(
       {
@@ -346,11 +340,14 @@ class MessageService {
       }
     );
 
+    messages.forEach(message => {
+      socketService.emitMessageRead(message.sender_id, message.id, userId);
+    });
+
     return { updated: result[0] };
   }
 
   async getRecentConversations(userId: string, limit = 10) {
-    // Get the most recent conversations
     const messages = await Message.findAll({
       where: {
         [Op.or]: [
@@ -372,7 +369,6 @@ class MessageService {
       limit,
     });
 
-    // Group by conversation partner
     const conversationMap = new Map();
     
     for (const message of messages) {
@@ -380,9 +376,12 @@ class MessageService {
       
       if (!conversationMap.has(otherUserId)) {
         const otherUser = message.sender_id === userId ? message.receiver : message.sender;
+        const isOnline = socketService.isUserOnline(otherUserId);
+        
         conversationMap.set(otherUserId, {
           user: otherUser,
           lastMessage: message,
+          isOnline,
         });
       }
     }
@@ -444,9 +443,9 @@ class MessageService {
       throw new Error('Unauthorized');
     }
 
-    // Mark as read if receiver
     if (message.receiver_id === userId && !message.read) {
       await message.markAsRead();
+      socketService.emitMessageRead(message.sender_id, messageId, userId);
     }
 
     return message;
