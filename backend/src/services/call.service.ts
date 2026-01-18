@@ -3,6 +3,7 @@
 import { Op } from 'sequelize';
 import { loggers } from '../utils/logger';
 import { notificationService } from './notification.service';
+import { socketService } from './socket.service';
 import type {
   InitiateCallData,
   CallHistoryResponse,
@@ -27,12 +28,7 @@ export enum CallType {
 }
 
 class CallService {
-  // ============================================
-  // INITIATE & MANAGE CALLS
-  // ============================================
-
   async initiateCall(callerId: string, data: InitiateCallData) {
-    // Verify users exist
     const [caller, receiver] = await Promise.all([
       User.findByPk(callerId),
       User.findByPk(data.receiverId),
@@ -46,7 +42,6 @@ class CallService {
       throw new Error('Cannot call yourself');
     }
 
-    // Check if there's an active call between these users
     const activeCall = await Call.findOne({
       where: {
         [Op.or]: [
@@ -68,7 +63,6 @@ class CallService {
       throw new Error('There is already an active call between these users');
     }
 
-    // Create call
     const call = await Call.create({
       caller_id: callerId,
       receiver_id: data.receiverId,
@@ -78,7 +72,6 @@ class CallService {
       bid_id: data.bidId,
     } as any);
 
-    // Fetch call with relationships
     const callWithRelations = await Call.findByPk(call.id, {
       include: [
         {
@@ -98,19 +91,34 @@ class CallService {
 
     loggers.info('Call initiated', { callId: call.id, callerId, receiverId: data.receiverId });
 
-    // Send push notification to receiver
-    await notificationService.sendPushNotification(data.receiverId, {
-      title: `Incoming ${data.type === CallType.VIDEO ? 'Video' : 'Audio'} Call`,
-      body: `${caller.first_name} ${caller.last_name} is calling you`,
-      type: 'INCOMING_CALL',
-      data: {
-        callId: call.id,
-        callerId,
-        type: data.type,
-        loadId: data.loadId,
-        bidId: data.bidId,
+    socketService.emitIncomingCall(data.receiverId, {
+      callId: call.id,
+      caller: {
+        id: caller.id,
+        firstName: caller.first_name,
+        lastName: caller.last_name,
+        profileImage: caller.profile_image,
       },
+      type: data.type,
+      loadId: data.loadId,
+      bidId: data.bidId,
+      timestamp: new Date(),
     });
+
+    if (!socketService.isUserOnline(data.receiverId)) {
+      await notificationService.sendPushNotification(data.receiverId, {
+        title: `Incoming ${data.type === CallType.VIDEO ? 'Video' : 'Audio'} Call`,
+        body: `${caller.first_name} ${caller.last_name} is calling you`,
+        type: 'INCOMING_CALL',
+        data: {
+          callId: call.id,
+          callerId,
+          type: data.type,
+          loadId: data.loadId,
+          bidId: data.bidId,
+        },
+      });
+    }
 
     return callWithRelations;
   }
@@ -148,12 +156,15 @@ class CallService {
 
     loggers.info('Call answered', { callId, receiverId });
 
-    // Notify caller that call was answered
-    await notificationService.sendPushNotification(call.caller_id, {
-      title: 'Call Answered',
-      body: `${call.receiver.first_name} ${call.receiver.last_name} answered your call`,
-      type: 'CALL_ANSWERED',
-      data: { callId },
+    socketService.emitCallAnswered(call.caller_id, {
+      callId,
+      receiver: {
+        id: call.receiver.id,
+        firstName: call.receiver.first_name,
+        lastName: call.receiver.last_name,
+        profileImage: call.receiver.profile_image,
+      },
+      timestamp: new Date(),
     });
 
     return call;
@@ -181,6 +192,12 @@ class CallService {
 
     loggers.info('Call rejected', { callId, receiverId });
 
+    socketService.emitCallRejected(call.caller_id, {
+      callId,
+      rejectedBy: receiverId,
+      timestamp: new Date(),
+    });
+
     return call;
   }
 
@@ -199,7 +216,6 @@ class CallService {
       throw new Error('Call already ended');
     }
 
-    // Calculate duration if call was answered
     let duration: number | undefined;
     if (call.started_at) {
       const endTime = new Date();
@@ -213,6 +229,15 @@ class CallService {
     });
 
     loggers.info('Call ended', { callId, userId, duration });
+
+    const otherUserId = call.caller_id === userId ? call.receiver_id : call.caller_id;
+    
+    socketService.emitCallEnded(otherUserId, {
+      callId,
+      endedBy: userId,
+      duration,
+      timestamp: new Date(),
+    });
 
     return call;
   }
@@ -239,6 +264,12 @@ class CallService {
 
     loggers.info('Call cancelled', { callId, callerId });
 
+    socketService.emitCallCancelled(call.receiver_id, {
+      callId,
+      cancelledBy: callerId,
+      timestamp: new Date(),
+    });
+
     return call;
   }
 
@@ -252,10 +283,6 @@ class CallService {
     await call.update({ status });
     return call;
   }
-
-  // ============================================
-  // RETRIEVE CALLS
-  // ============================================
 
   async getCall(callId: string, userId: string) {
     const call = await Call.findByPk(callId, {
@@ -377,10 +404,6 @@ class CallService {
     };
   }
 
-  // ============================================
-  // ANALYTICS
-  // ============================================
-
   async getCallStats(userId: string): Promise<CallStats> {
     const [
       total,
@@ -419,7 +442,6 @@ class CallService {
       }),
     ]);
 
-    // Calculate total duration
     const callsWithDuration = await Call.findAll({
       where: {
         [Op.or]: [
@@ -446,12 +468,7 @@ class CallService {
     };
   }
 
-  // ============================================
-  // HELPERS
-  // ============================================
-
   async markMissedCalls() {
-    // Mark calls that were initiated but never answered as missed
     const result = await Call.update(
       {
         status: CallStatus.MISSED,
@@ -461,7 +478,7 @@ class CallService {
         where: {
           status: { [Op.in]: [CallStatus.INITIATED, CallStatus.RINGING] },
           created_at: {
-            [Op.lt]: new Date(Date.now() - 5 * 60 * 1000), // 5 minutes ago
+            [Op.lt]: new Date(Date.now() - 5 * 60 * 1000),
           },
         },
       }
@@ -473,10 +490,6 @@ class CallService {
 
     return result[0];
   }
-
-  // ============================================
-  // NEW METHODS FOR SEQUELIZE
-  // ============================================
 
   async getRecentCalls(userId: string, limit = 20) {
     return await Call.findAll({
