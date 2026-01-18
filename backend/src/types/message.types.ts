@@ -23,6 +23,7 @@ export interface Conversation {
   user: any;
   lastMessage?: any;
   unreadCount: number;
+  isOnline?: boolean;
 }
 
 export interface ConversationListResponse {
